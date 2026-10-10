@@ -12,7 +12,7 @@ use crate::streamproxy::UPSTREAM_USER_AGENT;
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 38;
+pub(crate) const BUILD: u32 = 39;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";
@@ -193,23 +193,58 @@ fn with_curl<T>(
 }
 
 fn fetch_text(url: &str) -> Result<String, String> {
-    let output = with_curl(|mut command| {
+    let dir = update_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let out = dir.join("fetch.out");
+    let err = dir.join("fetch.err");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&err);
+    let args = |command: &mut std::process::Command| {
         command
             .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "20", "-A", UPSTREAM_USER_AGENT])
-            .args(["-H", "Accept: application/vnd.github+json"])
+            .args(["-H", "Accept: application/vnd.github+json", "-o"])
+            .arg(&out)
+            .arg("--stderr")
+            .arg(&err)
             .arg("--")
-            .arg(url)
-            .output()
-    })?;
-    if !output.status.success() {
-        let why = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            .arg(url);
+    };
+    // First way: no pipes at all (curl writes to files). Windows has refused piped starts.
+    let first = with_curl(|mut command| {
+        args(&mut command);
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    });
+    let (ok, text, why) = match first {
+        Ok(status) => (
+            status.success(),
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            std::fs::read_to_string(&err).unwrap_or_default(),
+        ),
+        Err(_) => {
+            // Second way: pipes.
+            let output = with_curl(|mut command| {
+                args(&mut command);
+                command.output()
+            })?;
+            (
+                output.status.success(),
+                std::fs::read_to_string(&out).unwrap_or_default(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        },
+    };
+    if !ok {
+        let why = why.trim().to_string();
         return Err(if why.contains("404") {
             "No release found yet.".to_string()
         } else {
             format!("Could not reach GitHub: {}", why.chars().take(160).collect::<String>())
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(text)
 }
 
 /// Looks for a newer release in the background (once per few minutes at most).
@@ -244,21 +279,82 @@ fn update_dir() -> PathBuf {
     std::env::temp_dir().join("pteron_update")
 }
 
+/// SHA-256 in plain Rust, so no other program has to be started to check a download.
+pub(crate) fn sha256_bytes(mut reader: impl std::io::Read) -> std::io::Result<String> {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    fn block(h: &mut [u32; 8], chunk: &[u8]) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (slot, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(v);
+        }
+    }
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut pending: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        pending.extend_from_slice(&buffer[..n]);
+        let whole = pending.len() / 64 * 64;
+        for chunk in pending[..whole].chunks(64) {
+            block(&mut h, chunk);
+        }
+        pending.drain(..whole);
+    }
+    pending.push(0x80);
+    while pending.len() % 64 != 56 {
+        pending.push(0);
+    }
+    pending.extend_from_slice(&(total * 8).to_be_bytes());
+    for chunk in pending.chunks(64) {
+        block(&mut h, chunk);
+    }
+    Ok(h.iter().map(|v| format!("{v:08x}")).collect())
+}
+
 fn sha256_of(path: &Path) -> Result<String, String> {
-    #[cfg(windows)]
-    let output = {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("certutil")
-            .arg("-hashfile")
-            .arg(path)
-            .arg("SHA256")
-            .creation_flags(0x0800_0000)
-            .output()
-    };
-    #[cfg(not(windows))]
-    let output = std::process::Command::new("sha256sum").arg(path).output();
-    let output = output.map_err(|e| format!("Could not check the download: {e}"))?;
-    parse_sha256(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| "Could not check the download.".to_string())
+    let file = std::fs::File::open(path).map_err(|e| format!("Could not check the download: {e}"))?;
+    sha256_bytes(std::io::BufReader::new(file)).map_err(|e| format!("Could not check the download: {e}"))
 }
 
 /// Download the release zip in the background and check it.
@@ -280,18 +376,29 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make a download folder: {e}"))?;
     let zip = dir.join(format!("Pteron-build-{}.zip", release.build));
+    let errfile = dir.join("download.err");
     let mut child = with_curl(|mut command| {
         command
             .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "1800", "-A", UPSTREAM_USER_AGENT, "-o"])
             .arg(&zip)
             .arg("--")
             .arg(&release.url)
-            .stderr(std::process::Stdio::piped())
+            .arg("--stderr")
+            .arg(&errfile)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
     })?;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let why = std::fs::read_to_string(&errfile).unwrap_or_default();
+                    let why = why.trim().chars().take(160).collect::<String>();
+                    return Err(format!("The download failed: {why}"));
+                }
+                break;
+            },
             Ok(None) => {
                 let done = std::fs::metadata(&zip).map(|m| m.len()).unwrap_or(0);
                 set(Status::Downloading { done, total: release.size });
@@ -299,11 +406,6 @@ fn download(release: &Release) -> Result<PathBuf, String> {
             },
             Err(e) => return Err(e.to_string()),
         }
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        let why = String::from_utf8_lossy(&output.stderr).trim().chars().take(160).collect::<String>();
-        return Err(format!("The download failed: {why}"));
     }
     let size = std::fs::metadata(&zip).map(|m| m.len()).unwrap_or(0);
     if release.size > 0 && size != release.size {
@@ -368,7 +470,15 @@ pub(crate) fn launch_installer() -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("powershell.exe")
+        let mut last = String::new();
+        for attempt in 0..4 {
+            let mut command = std::process::Command::new(if attempt < 2 { "powershell.exe".to_string() } else {
+                format!("{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+            });
+            command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
             .arg(&script)
             .args(["-ProcId", &std::process::id().to_string(), "-Zip"])
@@ -378,10 +488,14 @@ pub(crate) fn launch_installer() -> Result<(), String> {
             .arg("-Exe")
             .arg(&exe)
             // DETACHED_PROCESS | CREATE_NO_WINDOW: keeps running after Pteron closes.
-            .creation_flags(0x0000_0008 | 0x0800_0000)
-            .spawn()
-            .map_err(|e| format!("Could not start the update: {e}"))?;
-        Ok(())
+            .creation_flags(0x0000_0008 | 0x0800_0000);
+            match command.spawn() {
+                Ok(_) => return Ok(()),
+                Err(e) => last = e.to_string(),
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        Err(format!("Could not start the update: {last}"))
     }
     #[cfg(not(windows))]
     {
@@ -459,5 +573,22 @@ mod tests {
         let certutil = format!("SHA256 hash of file x.zip:\r\n{}\r\nCertUtil: -hashfile command completed successfully.", "0f".repeat(32));
         assert_eq!(parse_sha256(&certutil), Some("0f".repeat(32)));
         assert_eq!(parse_sha256("nothing"), None);
+    }
+
+    #[test]
+    fn sha256_matches_known_values() {
+        assert_eq!(
+            sha256_bytes(&b""[..]).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_bytes(&b"abc"[..]).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let big = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_bytes(&big[..]).unwrap(),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
     }
 }
