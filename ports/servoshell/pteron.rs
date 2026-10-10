@@ -507,7 +507,7 @@ pub(crate) fn welcome_html() -> String {
 <p class=sub>A light browser built on the Servo engine. This is an early test version.</p>\
 <div class=card><h2>What to expect</h2><ul>\
 <li>It uses much less memory than the big browsers, and background tabs go to sleep by themselves.</li>\
-<li>YouTube opens in Pteron's own simple player.</li>\
+<li>YouTube opens in Pteron's own simple player, and <b>Music</b> in its header opens Plume Music for listening.</li>\
 <li>It is young: some websites look wrong, load slowly or do not work. <a href=\"servo:known-issues\">See the list of known problems.</a></li></ul></div>\
 <div class=card><h2>Found a problem?</h2>\
 <p>Open the sidebar, then <b>Settings &rarr; About &rarr; Report a problem</b>. It saves a small file on your Desktop with the details. Send that file to whoever gave you Pteron.</p></div>\
@@ -529,6 +529,10 @@ pub(crate) fn known_issues_html() -> String {
 <li>Videos play up to 1080p60 in the H.264 format. VP9, AV1 and 4K are not supported.</li>\
 <li>Very long videos can take several seconds to become fully seekable, and YouTube may slow requests down.</li>\
 <li>1080p60 on a slow computer can look soft or stutter. Try 720p60.</li></ul></div>\
+<div class=card><h2>Plume Music</h2><ul>\
+<li>Songs come from YouTube, so search results are ordinary YouTube results, not a curated music catalogue.</li>\
+<li>Very long tracks (mixes over about 20 minutes) take longer to start.</li>\
+<li>Music keeps playing while you use other tabs, but only while the Music tab stays open.</li></ul></div>\
 <div class=card><h2>The browser</h2><ul>\
 <li>Windows only for now. No extensions, no ad blocker, no sync, no password manager.</li>\
 <li>The installer is not signed yet, so Windows shows a &quot;protected your PC&quot; warning. Choose <b>More info</b>, then <b>Run anyway</b>.</li>\

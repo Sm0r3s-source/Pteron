@@ -369,7 +369,11 @@ fn item_from_renderer(r: &Value) -> Option<VideoItem> {
         id: id.to_string(),
         title: r.get("title").map(text_of).unwrap_or_default(),
         channel: owner,
-        duration_secs: r.get("lengthText").map(text_of).and_then(|t| parse_clock(&t)),
+        duration_secs: r
+            .get("lengthText")
+            .map(text_of)
+            .and_then(|t| parse_clock(&t))
+            .or_else(|| r.get("lengthSeconds").and_then(as_u64)),
         views,
     })
 }
@@ -424,7 +428,9 @@ fn collect(v: &Value, out: &mut Vec<VideoItem>, limit: usize) {
         Value::Object(map) => {
             for (key, child) in map {
                 let item = match key.as_str() {
-                    "videoRenderer" | "gridVideoRenderer" => item_from_renderer(child),
+                    "videoRenderer" | "gridVideoRenderer" | "playlistVideoRenderer" | "playlistPanelVideoRenderer" => {
+                        item_from_renderer(child)
+                    },
                     "lockupViewModel" => item_from_lockup(child),
                     _ => None,
                 };
@@ -993,5 +999,74 @@ mod tests {
         assert!(valid_continuation("abc%3D-_.~") && !valid_continuation("a b") && !valid_continuation("a\"b") && !valid_continuation(""));
         let empty = parse_channel(&json!({}), vec![]);
         assert_eq!((empty.avatar.as_str(), empty.banner.as_str(), empty.next.as_deref()), ("", "", None));
+    }
+}
+
+
+// ---------------------------------------------------------------- playlists and albums
+
+/// Whether `id` can be a YouTube playlist id (`PL...`, `OLAK5uy_...`, `RDCLAK...`).
+pub(crate) fn valid_playlist_id(id: &str) -> bool {
+    (10..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+#[derive(Debug, PartialEq, Default)]
+pub(crate) struct Playlist {
+    pub title: String,
+    pub items: Vec<VideoItem>,
+}
+
+pub(crate) fn parse_playlist(answer: &Value) -> Playlist {
+    let title = ["/header/playlistHeaderRenderer/title", "/metadata/playlistMetadataRenderer/title"]
+        .iter()
+        .find_map(|p| answer.pointer(p).map(text_of).filter(|t| !t.is_empty()))
+        .unwrap_or_default();
+    Playlist { title, items: parse_videos(answer, 300) }
+}
+
+/// The songs of a playlist or album, in order.
+pub(crate) fn playlist(id: &str) -> Result<Playlist, String> {
+    if !valid_playlist_id(id) {
+        return Err("That does not look like a playlist.".into());
+    }
+    let answer = post("browse", json!({"browseId": format!("VL{id}")}), Client::Web)?;
+    let list = parse_playlist(&answer);
+    if list.items.is_empty() {
+        return Err("This playlist has no videos Pteron can play.".into());
+    }
+    Ok(list)
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_playlist_answer() {
+        let answer = json!({
+            "header": {"playlistHeaderRenderer": {"title": {"simpleText": "Road trip"}}},
+            "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [{"playlistVideoListRenderer": {"contents": [
+                {"playlistVideoRenderer": {"videoId": "dQw4w9WgXcQ", "title": {"runs": [{"text": "Never Gonna Give You Up"}]},
+                    "shortBylineText": {"runs": [{"text": "Rick Astley"}]}, "lengthText": {"simpleText": "3:33"}, "lengthSeconds": "213"}},
+                {"playlistVideoRenderer": {"videoId": "9bZkp7q19f0", "title": {"runs": [{"text": "Gangnam Style"}]},
+                    "shortBylineText": {"runs": [{"text": "PSY"}]}, "lengthSeconds": "252"}},
+                {"playlistVideoRenderer": {"videoId": "bad", "title": {"runs": [{"text": "Broken id"}]}}}
+            ]}}]}}]}}}}]}}
+        });
+        let list = parse_playlist(&answer);
+        assert_eq!(list.title, "Road trip");
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items[0].id, "dQw4w9WgXcQ");
+        assert_eq!(list.items[0].channel, "Rick Astley");
+        assert_eq!(list.items[0].duration_secs, Some(213));
+        assert_eq!(list.items[1].duration_secs, Some(252));
+    }
+
+    #[test]
+    fn playlist_ids_are_checked() {
+        assert!(valid_playlist_id("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"));
+        assert!(valid_playlist_id("OLAK5uy_kMn0lyHcSJ5oQ4-1bhZeGfbMCEyA"));
+        assert!(!valid_playlist_id("short"));
+        assert!(!valid_playlist_id("PL12345678;rm -rf"));
     }
 }

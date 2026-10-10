@@ -28,6 +28,8 @@ use log::{info, warn};
 use crate::mp4mux::{Init, Kind, Layout, MuxError, build_layout, load_track, parse_init};
 
 const MAX_SETS: usize = 24;
+/// The "quality" number of the audio-only file of a track (Pteron Music).
+pub(crate) const AUDIO_ONLY: u32 = 0;
 const MAX_SESSIONS: usize = 8;
 /// The first part of a video that is made ready at once (seconds), so playback can start
 /// while the whole file layout is still being worked out.
@@ -270,6 +272,11 @@ impl Proxy {
         format!("http://127.0.0.1:{}/m/{}", self.port, self.state.lock().unwrap().suggest_token)
     }
 
+    /// Address the Music page sends its commands to (`?x=search:...`).
+    pub(crate) fn music_url(&self) -> String {
+        format!("http://127.0.0.1:{}/u/{}", self.port, self.state.lock().unwrap().suggest_token)
+    }
+
     pub(crate) fn url(&self, token: &str, itag: u32) -> String {
         format!("http://127.0.0.1:{}/v/{token}/{itag}.mp4", self.port)
     }
@@ -398,6 +405,29 @@ fn session_for(
         let guard = state.lock().unwrap();
         guard.sets.iter().find(|(t, _)| t == token).map(|(_, s)| s.clone()).ok_or("unknown video")?
     };
+    if itag == AUDIO_ONLY {
+        // Pteron Music: only the audio track, no video is downloaded at all.
+        let (audio_init, audio_data) = prepare_stream(&set.audio, net, None)?;
+        let layout = crate::mp4mux::build_audio_layout(&audio_init, &audio_data).map_err(|e| e.to_string())?;
+        crate::crashlog::note(&format!(
+            "music helper: audio file ready, {} pieces, {} bytes",
+            layout.pieces.len(),
+            layout.total
+        ));
+        let session = Arc::new(Session {
+            layout,
+            video_url: set.audio.url.clone(),
+            audio_url: set.audio.url.clone(),
+            net: net.clone(),
+            slots: Mutex::new(std::collections::HashMap::new()),
+        });
+        let mut guard = state.lock().unwrap();
+        guard.sessions.push(((token.to_string(), itag, false), session.clone()));
+        if guard.sessions.len() > MAX_SESSIONS {
+            guard.sessions.remove(0);
+        }
+        return Ok(session);
+    }
     let video = set.videos.iter().find(|v| v.itag == itag).ok_or("unknown quality")?.clone();
     // The two streams are independent: headers first, then the per-segment tables.
     let limit = partial.then_some(PARTIAL_SECS);
@@ -514,6 +544,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<State>>, net: &Net
             'o' => ("text/plain", crate::youtube::player_memory(&value)),
             'q' => ("application/json", crate::youtube::search_more_json(&value)),
             'c' => ("application/json", crate::youtube::comments_json(&value)),
+            'u' => ("application/json", crate::music::command(&value)),
             _ => ("application/json", crate::youtube::more_json(&value)),
         };
         let head_text = format!(
@@ -614,6 +645,7 @@ fn helper_request(path: &str, token: &str) -> Option<(char, String)> {
         "/o/" => ('o', "p"),
         "/q/" => ('q', "c"),
         "/c/" => ('c', "c"),
+        "/u/" => ('u', "x"),
         _ => return None,
     };
     let (given, query) = path[3..].split_once('?')?;

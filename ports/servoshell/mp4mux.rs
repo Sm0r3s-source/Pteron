@@ -845,6 +845,51 @@ pub(crate) fn build_layout(video: &Init, vdata: &TrackData, audio: &Init, adata:
     })
 }
 
+/// A file with only the audio track (for listening to music without downloading any video).
+pub(crate) fn build_audio_layout(audio: &Init, adata: &TrackData) -> Res<Layout> {
+    let mut order: Vec<Placed> = Vec::new();
+    for seg in &adata.segments {
+        for c in &seg.chunks {
+            order.push(Placed { kind: Kind::Audio, chunk: *c });
+        }
+    }
+    let payload: u64 = order.iter().map(|p| p.chunk.len).sum();
+    let wide = payload > 0xF000_0000;
+    let at = sample_tables(adata, false);
+    let mscale = movie_scale(audio)?;
+    let mut moov_len = 0usize;
+    let mut prefix_out: Option<Vec<u8>> = None;
+    for pass in 0..2 {
+        let prefix_len = if pass == 0 { 0 } else { ftyp().len() + moov_len + 16 } as u64;
+        let mut rel = 0u64;
+        let mut aoff = Vec::with_capacity(order.len());
+        for p in &order {
+            aoff.push(prefix_len + rel);
+            rel += p.chunk.len;
+        }
+        let (atrak, adur) = build_trak(audio, 1, &at, &aoff, wide, mscale, false)?;
+        let (mvhd, _) = mvhd_for(audio, adur)?;
+        let moov = boxed(b"moov", &[&mvhd, &atrak]);
+        moov_len = moov.len();
+        if pass == 1 {
+            let mut prefix = ftyp();
+            prefix.extend_from_slice(&moov);
+            prefix.extend_from_slice(&1u32.to_be_bytes());
+            prefix.extend_from_slice(b"mdat");
+            prefix.extend_from_slice(&(16 + payload).to_be_bytes());
+            prefix_out = Some(prefix);
+        }
+    }
+    let prefix = prefix_out.ok_or(MuxError("could not build the file".into()))?;
+    let mut pieces = Vec::with_capacity(order.len());
+    let mut out = prefix.len() as u64;
+    for p in order {
+        pieces.push(Piece { kind: p.kind, src_start: p.chunk.src_start, len: p.chunk.len, out_start: out });
+        out += p.chunk.len;
+    }
+    Ok(Layout { prefix, pieces, total: out })
+}
+
 pub(crate) type PieceFetch<'a> = &'a dyn Fn(Kind, u64, u64) -> Result<Vec<u8>, String>;
 
 impl Layout {
@@ -1008,6 +1053,33 @@ mod tests {
         assert!((d - 20.0).abs() < 0.5, "{d}");
         // seeking in the middle works (ffmpeg input seek) and decodes cleanly
         let seek = Command::new("ffmpeg").args(["-v", "error", "-ss", "12", "-i"]).arg(&out).args(["-t", "3", "-f", "null", "-"]).output().unwrap();
+        assert!(seek.status.success() && seek.stderr.is_empty(), "{}", String::from_utf8_lossy(&seek.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_audio_only_file_plays() {
+        if !have_ffmpeg() { return; }
+        let dir = std::env::temp_dir().join(format!("pteron_mux_a_{}", std::process::id()));
+        let (_v, a) = make_samples(&dir, 15);
+        let ai = init_of(&a);
+        let ad = load_track(&ai, &batch(&a), None).unwrap();
+        let layout = build_audio_layout(&ai, &ad).unwrap();
+        let fetch = |_kind: Kind, start: u64, len: u64| -> Result<Vec<u8>, String> {
+            Ok(a[start as usize..(start + len) as usize].to_vec())
+        };
+        let mut out_bytes = Vec::new();
+        layout.read_range(0, layout.total - 1, &fetch, &mut |c| { out_bytes.extend_from_slice(c); true }).unwrap();
+        assert_eq!(out_bytes.len() as u64, layout.total);
+        let out = dir.join("audio.mp4");
+        std::fs::write(&out, &out_bytes).unwrap();
+        let info = probe(&out);
+        assert!(info.contains("codec_type=audio") && !info.contains("codec_type=video"), "{info}");
+        let d: f64 = info.lines().find_map(|l| l.strip_prefix("duration=").and_then(|x| x.parse().ok())).unwrap();
+        assert!((d - 15.0).abs() < 0.5, "{d}");
+        let decode = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(&out).args(["-f", "null", "-"]).output().unwrap();
+        assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+        let seek = Command::new("ffmpeg").args(["-v", "error", "-ss", "9", "-i"]).arg(&out).args(["-t", "3", "-f", "null", "-"]).output().unwrap();
         assert!(seek.status.success() && seek.stderr.is_empty(), "{}", String::from_utf8_lossy(&seek.stderr));
         let _ = std::fs::remove_dir_all(&dir);
     }

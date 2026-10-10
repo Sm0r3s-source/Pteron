@@ -68,6 +68,8 @@ pub(crate) enum Action {
     /// The Pteron YouTube start page.
     Home,
     Open(Request),
+    /// Plume Music, optionally opened on a playlist or album.
+    Music(Option<String>),
 }
 
 static IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
@@ -158,10 +160,27 @@ pub(crate) fn classify(url: &Url) -> Option<Action> {
                     Some(Action::Open(Request::Search(query)))
                 };
             }
+            if path == "/playlist" &&
+                let Some(list) = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "list")
+                    .map(|(_, value)| value.into_owned())
+                    .filter(|list| innertube::valid_playlist_id(list))
+            {
+                return Some(Action::Music(Some(list)));
+            }
             if path == "/" || path.is_empty() || path.starts_with("/feed") {
                 return Some(Action::Home);
             }
             channel_path(path).map(|path| Action::Open(Request::Channel(path)))
+        },
+        "music.youtube.com" => {
+            let list = url
+                .query_pairs()
+                .find(|(key, _)| key == "list")
+                .map(|(_, value)| value.into_owned())
+                .filter(|list| innertube::valid_playlist_id(list));
+            Some(Action::Music(list))
         },
         "youtu.be" => {
             let id = url.path_segments().and_then(|mut s| s.next())?.to_string();
@@ -389,7 +408,8 @@ fn page_with(title: &str, query: &str, focus: bool, body: &str, refresh: bool) -
          <header><a class=\"brand\" href=\"https://www.youtube.com/\">{FEATHER}Plume</a>\
          <form action=\"https://www.youtube.com/results\" method=\"get\" class=\"search\">\
          <input name=\"search_query\" value=\"{}\" placeholder=\"Search YouTube\"{}>\
-         <button type=\"submit\">Search</button></form></header>\
+         <button type=\"submit\">Search</button></form>\
+         <a class=\"plain\" href=\"https://music.youtube.com/\">Music</a></header>\
          <main>{body}</main>{suggest}<script>{LAZY_JS}</script>{reload}</body></html>",
         esc(title),
         esc(query),
@@ -1035,6 +1055,15 @@ fn start(request: Request, message: &str) -> Option<Url> {
 /// Handle a navigation that `classify` matched. Returns the local page to show now.
 pub(crate) fn handle(action: Action) -> Option<Url> {
     match action {
+        Action::Music(list) => {
+            let path = page_path("music")?;
+            write_page("music", &crate::music::page_html());
+            let mut url = Url::from_file_path(path).ok()?;
+            if let Some(list) = list {
+                url.set_fragment(Some(&format!("list={list}")));
+            }
+            Some(url)
+        },
         Action::Home => {
             let path = page_path("home")?;
             write_page("home", &home_html());
@@ -1090,6 +1119,22 @@ mod tests {
         assert_eq!(watch("https://evil.example/watch?v=dQw4w9WgXcQ"), None);
         assert_eq!(watch("https://www.youtube.com.evil.example/watch?v=dQw4w9WgXcQ"), None);
         assert_eq!(watch("https://pteron.internal/install-ytdlp#dQw4w9WgXcQ"), None);
+    }
+
+    #[test]
+    fn music_links_open_plume_music() {
+        assert_eq!(watch("https://music.youtube.com/"), Some(Action::Music(None)));
+        assert_eq!(watch("https://music.youtube.com/watch?v=dQw4w9WgXcQ"), Some(Action::Music(None)));
+        assert_eq!(
+            watch("https://music.youtube.com/playlist?list=OLAK5uy_kMn0lyHcSJ5oQ4-1bhZeGfbMCEyA"),
+            Some(Action::Music(Some("OLAK5uy_kMn0lyHcSJ5oQ4-1bhZeGfbMCEyA".into())))
+        );
+        assert_eq!(
+            watch("https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"),
+            Some(Action::Music(Some("PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf".into())))
+        );
+        assert_eq!(watch("https://music.youtube.com/playlist?list=bad;id"), Some(Action::Music(None)));
+        assert_eq!(watch("https://music.youtube.com.evil.example/"), None);
     }
 
     #[test]

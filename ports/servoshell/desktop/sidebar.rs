@@ -376,6 +376,34 @@ fn framed(
                     {
                         actions.push(Action::NewTab);
                     }
+                    // Pteron: what Plume Music is playing, with simple controls.
+                    if let Some(now) = crate::music::now_playing() {
+                        ui.add_space(6.0);
+                        Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(inner_width - 14.0);
+                            let title: String = if now.title.chars().count() > 38 {
+                                now.title.chars().take(37).chain(std::iter::once('\u{2026}')).collect()
+                            } else {
+                                now.title.clone()
+                            };
+                            ui.label(RichText::new(title).small());
+                            ui.horizontal(|ui| {
+                                if ui.small_button("|<").on_hover_text("Previous song").clicked() {
+                                    crate::music::send_command("prev");
+                                }
+                                if ui
+                                    .small_button(if now.playing { "Pause" } else { "Play" })
+                                    .clicked()
+                                {
+                                    crate::music::send_command("toggle");
+                                }
+                                if ui.small_button(">|").on_hover_text("Next song").clicked() {
+                                    crate::music::send_command("next");
+                                }
+                            });
+                        });
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
+                    }
                     ui.add_space(6.0);
                     ui.separator();
 
