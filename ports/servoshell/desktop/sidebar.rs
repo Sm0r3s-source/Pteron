@@ -1,0 +1,787 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+//! Pteron: a Zen-style vertical sidebar. It floats over the page (the page is never
+//! shifted or resized) and slides in when the pointer touches the left window edge.
+//! This module only knows about egui; `gui.rs` turns the returned [`Action`]s into
+//! servoshell commands.
+
+use egui::text::{CCursor, CCursorRange};
+use egui::text_edit::TextEditState;
+use egui::{
+    Align2, Area, Button, Color32, Context, FontId, Frame, Id, Key, Modifiers, Order, Pos2, Rect,
+    RichText, ScrollArea, Sense, Shape, Stroke, TextEdit, pos2, vec2,
+};
+
+/// Width of the open sidebar, in egui points.
+pub(crate) const WIDTH: f32 = 260.0;
+/// Width of the invisible strip at the left edge that opens the sidebar.
+pub(crate) const HOT_ZONE: f32 = 4.0;
+const LOCATION_ID: &str = "location_input";
+const ROW_HEIGHT: f32 = 28.0;
+
+/// One live tab, as shown in the list.
+pub(crate) struct TabRow {
+    pub label: String,
+    pub active: bool,
+    pub pinned: bool,
+    pub favicon: Option<egui::load::SizedTexture>,
+}
+
+/// One bookmark, as shown in the list.
+pub(crate) struct BookmarkRow {
+    pub label: String,
+    pub url: String,
+}
+
+/// One sleeping tab, as shown in the list.
+pub(crate) struct SleepingRow {
+    pub label: String,
+    pub pinned: bool,
+}
+
+/// Everything the sidebar needs to draw itself.
+/// What the address bar says about the connection of the current page.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(crate) enum Security {
+    /// Internal pages, new tab, local files: nothing to say.
+    #[default]
+    None,
+    /// https
+    Secure,
+    /// plain http
+    NotSecure,
+}
+
+pub(crate) struct Model {
+    pub security: Security,
+    pub tabs: Vec<TabRow>,
+    /// Sleeping tabs.
+    pub sleeping: Vec<SleepingRow>,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub loading: bool,
+    pub experimental: bool,
+    pub bookmarks: Vec<BookmarkRow>,
+    /// Whether the page in the active tab is bookmarked, and whether it can be at all.
+    pub bookmarked: bool,
+    pub can_bookmark: bool,
+    /// Pages matching what is being typed in the address bar.
+    pub suggestions: Vec<crate::library::Suggestion>,
+}
+
+/// What the user did in the sidebar this frame.
+pub(crate) enum Action {
+    Back,
+    Forward,
+    Reload,
+    Go(String),
+    NewTab,
+    NewWindow,
+    Activate(usize),
+    Close(usize),
+    Wake(usize),
+    CloseSleeping(usize),
+    TogglePin(usize),
+    TogglePinSleeping(usize),
+    ToggleBookmark,
+    OpenBookmark(usize),
+    OpenBookmarkInNewTab(usize),
+    RemoveBookmark(usize),
+    SetExperimental(bool),
+    ToggleSettings,
+}
+
+#[derive(Default)]
+pub(crate) struct State {
+    /// Whether the sidebar is currently shown.
+    pub visible: bool,
+    /// Keep the sidebar open all the time (comes from the settings).
+    pub pinned: bool,
+    /// Ask the address bar to take keyboard focus (Ctrl+L).
+    pub focus_location: bool,
+    /// Width of the part of the window (from the left edge) that belongs to the sidebar
+    /// right now, including the hot zone when hidden. Used to route mouse events.
+    pub hit_width: f32,
+}
+
+/// Decide whether the sidebar is shown this frame.
+pub(crate) fn update_visibility(ctx: &Context, state: &mut State) {
+    let pointer_x = ctx.pointer_latest_pos().map(|pos| pos.x);
+    let location_focused = ctx.memory(|memory| memory.has_focus(Id::new(LOCATION_ID)));
+    let reach = if state.visible { WIDTH + 6.0 } else { HOT_ZONE };
+    let near = pointer_x.is_some_and(|x| x <= reach);
+    let visible = state.pinned || state.focus_location || location_focused || near;
+    if visible != state.visible {
+        ctx.request_repaint();
+    }
+    state.visible = visible;
+    state.hit_width = if visible { WIDTH } else { HOT_ZONE };
+}
+
+/// Width (in egui points) that a pinned sidebar takes from the left of the page. Read by the
+/// window to move mouse positions and pop-ups, which are measured from the page's corner.
+static LEFT_INSET_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn set_left_inset(points: f32) {
+    LEFT_INSET_BITS.store(points.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn left_inset() -> f32 {
+    f32::from_bits(LEFT_INSET_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Is the address bar being edited right now?
+pub(crate) fn location_focused(ctx: &Context) -> bool {
+    ctx.memory(|memory| memory.has_focus(Id::new(LOCATION_ID)))
+}
+
+/// A star (outlined, or filled when the page is bookmarked), drawn with the painter.
+fn star_button(ui: &mut egui::Ui, filled: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), sense);
+    if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let gold = Color32::from_rgb(0xd6, 0xaa, 0x48);
+    let color = if !enabled {
+        ui.visuals().weak_text_color()
+    } else if filled {
+        gold
+    } else {
+        ui.visuals().text_color()
+    };
+    let center = rect.center() + vec2(0.0, 0.5);
+    let points: Vec<Pos2> = (0..10)
+        .map(|i| {
+            let angle = i as f32 * std::f32::consts::PI / 5.0 - std::f32::consts::FRAC_PI_2;
+            let radius = if i % 2 == 0 { 9.0_f32 } else { 4.0_f32 };
+            center + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    if filled && enabled {
+        ui.painter()
+            .add(Shape::convex_polygon(points, color, Stroke::new(1.0_f32, color)));
+    } else {
+        ui.painter()
+            .add(Shape::closed_line(points, Stroke::new(1.4_f32, color)));
+    }
+    response
+}
+
+fn icon_button(text: &str) -> Button<'_> {
+    Button::new(text).frame(false).min_size(vec2(26.0, 26.0))
+}
+
+/// A cog with triangular teeth, drawn with the painter (no font glyph needed).
+fn cog_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let color = ui.visuals().text_color();
+    let center = rect.center();
+    // 8 triangular teeth on a round body: base-left, tip, base-right, valley.
+    let teeth = 8;
+    let step = std::f32::consts::TAU / teeth as f32;
+    let (body, tip, half_width) = (7.0_f32, 10.4_f32, 0.27_f32);
+    let at = |angle: f32, radius: f32| -> Pos2 {
+        center + vec2(angle.cos(), angle.sin()) * radius
+    };
+    let mut points: Vec<Pos2> = Vec::with_capacity(teeth * 4);
+    for i in 0..teeth {
+        let angle = i as f32 * step - std::f32::consts::FRAC_PI_2;
+        points.push(at(angle - half_width, body));
+        points.push(at(angle, tip));
+        points.push(at(angle + half_width, body));
+        points.push(at(angle + step / 2.0, body));
+    }
+    let stroke = Stroke::new(1.6_f32, color);
+    ui.painter().add(Shape::closed_line(points, stroke));
+    ui.painter().circle_stroke(center, 3.0, stroke);
+    response
+}
+
+/// Draw the sidebar (if visible) and report what was clicked.
+/// Draw the sidebar and report what was clicked. While pinned it is a real panel that
+/// takes space from the page; otherwise it floats over the page and only shows when the
+/// pointer touches the left edge.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    model: &Model,
+    location: &mut String,
+    location_dirty: &mut bool,
+    height: f32,
+) -> Vec<Action> {
+    let mut actions = Vec::new();
+    // A steady, clearly visible typing cursor. (The blinking one needs timed repaints, which
+    // Pteron does not run while idle, so it could stay invisible.)
+    if ui.ctx().global_style().visuals.text_cursor.blink {
+        ui.ctx().global_style_mut(|style| {
+            style.visuals.text_cursor.blink = false;
+            style.visuals.text_cursor.stroke = Stroke::new(2.0, Color32::from_rgb(214, 170, 72));
+        });
+    }
+    if state.pinned {
+        egui::Panel::left("pteron_sidebar_panel")
+            .resizable(false)
+            .exact_size(WIDTH)
+            .frame(Frame::NONE)
+            .show_inside(ui, |ui| {
+                framed(ui, state, model, location, location_dirty, height, &mut actions);
+            });
+        return actions;
+    }
+    if !state.visible {
+        return actions;
+    }
+    let ctx = ui.ctx().clone();
+    Area::new(Id::new("pteron_sidebar"))
+        .order(Order::Foreground)
+        .fixed_pos(pos2(0.0, 0.0))
+        .show(&ctx, |ui| {
+            framed(ui, state, model, location, location_dirty, height, &mut actions);
+        });
+    actions
+}
+
+fn framed(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    model: &Model,
+    location: &mut String,
+    location_dirty: &mut bool,
+    height: f32,
+    actions: &mut Vec<Action>,
+) {
+    let margin = 8.0;
+    {
+        {
+            Frame::default()
+                .fill(ui.visuals().window_fill)
+                .stroke(ui.visuals().window_stroke)
+                .inner_margin(margin)
+                .show(ui, |ui| {
+                    ui.set_width(WIDTH - 2.0 * margin);
+                    ui.set_min_height(height - 2.0 * margin);
+                    let inner_width = ui.available_width();
+
+                    // Navigation buttons.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(model.can_go_back, icon_button("⏴"))
+                            .on_hover_text("Back")
+                            .clicked()
+                        {
+                            *location_dirty = false;
+                            actions.push(Action::Back);
+                        }
+                        if ui
+                            .add_enabled(model.can_go_forward, icon_button("⏵"))
+                            .on_hover_text("Forward")
+                            .clicked()
+                        {
+                            *location_dirty = false;
+                            actions.push(Action::Forward);
+                        }
+                        if !model.loading &&
+                            ui.add(icon_button("↻")).on_hover_text("Reload").clicked()
+                        {
+                            *location_dirty = false;
+                            actions.push(Action::Reload);
+                        }
+                        if model.loading {
+                            ui.add_enabled(false, icon_button("…"));
+                        }
+                        if star_button(ui, model.bookmarked, model.can_bookmark)
+                            .on_hover_text(if model.bookmarked {
+                                "Remove bookmark"
+                            } else {
+                                "Bookmark this page"
+                            })
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleBookmark);
+                        }
+                    });
+                    ui.add_space(4.0);
+
+                    // Address bar.
+                    let location_id = Id::new(LOCATION_ID);
+                    let field = ui.add_sized(
+                        [inner_width, 28.0],
+                        TextEdit::singleline(location)
+                            .id(location_id)
+                            .hint_text("Search or enter address"),
+                    );
+                    if field.changed() {
+                        *location_dirty = true;
+                    }
+                    match model.security {
+                        Security::Secure => {
+                            ui.label(
+                                RichText::new("\u{1F512} Secure connection (https)")
+                                    .small()
+                                    .color(Color32::from_rgb(70, 160, 90)),
+                            );
+                        },
+                        Security::NotSecure => {
+                            ui.label(
+                                RichText::new("\u{26A0} Not secure (http) - do not enter passwords")
+                                    .small()
+                                    .color(Color32::from_rgb(220, 150, 40)),
+                            );
+                        },
+                        Security::None => {},
+                    }
+                    if field.has_focus() && *location_dirty && !model.suggestions.is_empty() {
+                        suggestion_popup(
+                            ui.ctx(),
+                            field.rect,
+                            &model.suggestions,
+                            location_dirty,
+                            actions,
+                        );
+                    }
+                    let shortcut = ui.input_mut(|input| {
+                        input.consume_key(Modifiers::COMMAND, Key::L) ||
+                            (!cfg!(target_os = "macos") &&
+                                input.consume_key(Modifiers::ALT, Key::D))
+                    });
+                    if shortcut || state.focus_location {
+                        field.request_focus();
+                        state.focus_location = false;
+                    }
+                    if field.gained_focus() &&
+                        let Some(mut edit) = TextEditState::load(ui.ctx(), location_id)
+                    {
+                        edit.cursor.set_char_range(Some(CCursorRange::two(
+                            CCursor::new(0),
+                            CCursor::new(location.len()),
+                        )));
+                        edit.store(ui.ctx(), location_id);
+                    }
+                    if field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+                        actions.push(Action::Go(location.clone()));
+                    }
+                    ui.add_space(6.0);
+
+                    if ui
+                        .add_sized([inner_width, ROW_HEIGHT], Button::new("+  New tab"))
+                        .clicked()
+                    {
+                        actions.push(Action::NewTab);
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+
+                    // Vertical tab list.
+                    let list_height = (height - 190.0).max(60.0);
+                    ScrollArea::vertical()
+                        .max_height(list_height)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            // Pinned tabs first, then the rest.
+                            let any_pinned = model.tabs.iter().any(|tab| tab.pinned) ||
+                                model.sleeping.iter().any(|tab| tab.pinned);
+                            for section_pinned in [true, false] {
+                                if section_pinned {
+                                    if !any_pinned {
+                                        continue;
+                                    }
+                                } else if any_pinned {
+                                    ui.add_space(2.0);
+                                    ui.separator();
+                                    ui.add_space(2.0);
+                                }
+                                for (index, tab) in model.tabs.iter().enumerate() {
+                                    if tab.pinned == section_pinned {
+                                        tab_row(ui, index, tab, actions);
+                                    }
+                                }
+                                for (index, tab) in model.sleeping.iter().enumerate() {
+                                    if tab.pinned == section_pinned {
+                                        sleeping_row(ui, index, tab, actions);
+                                    }
+                                }
+                            }
+                            downloads_section(ui);
+                            if !model.bookmarks.is_empty() {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.label(RichText::new("Bookmarks").small().weak());
+                                for (index, bookmark) in model.bookmarks.iter().enumerate() {
+                                    bookmark_row(ui, index, bookmark, actions);
+                                }
+                            }
+                        });
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut experimental = model.experimental;
+                        if ui
+                            .add_sized(
+                                [26.0, 26.0],
+                                Button::new(RichText::new("☢").size(16.0))
+                                    .frame(false)
+                                    .selected(experimental),
+                            )
+                            .on_hover_text("Enable experimental prefs")
+                            .clicked()
+                        {
+                            experimental = !experimental;
+                            *location_dirty = false;
+                            actions.push(Action::SetExperimental(experimental));
+                        }
+                        if ui
+                            .add_sized([26.0, 26.0], Button::new(RichText::new("⊞").size(16.0)).frame(false))
+                            .on_hover_text("New window")
+                            .clicked()
+                        {
+                            actions.push(Action::NewWindow);
+                        }
+                        if cog_button(ui).on_hover_text("Settings").clicked() {
+                            actions.push(Action::ToggleSettings);
+                        }
+                    });
+                });
+        }
+    }
+}
+
+/// The list of downloads (hidden when there are none).
+fn downloads_section(ui: &mut egui::Ui) {
+    use crate::downloads::{self, State};
+    let items = downloads::snapshot();
+    if items.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(RichText::new("Downloads").small().weak());
+    for item in items.iter().rev().take(8) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut name = item.name.clone();
+            if name.chars().count() > 26 {
+                name = format!("{}...", name.chars().take(25).collect::<String>());
+            }
+            ui.label(RichText::new(name).strong());
+            match &item.state {
+                State::Confirm => {
+                    ui.label(
+                        RichText::new("\u{26A0} This is a program. It can harm your computer if you do not trust the site.")
+                            .small()
+                            .color(Color32::from_rgb(220, 150, 40)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Download anyway").clicked() {
+                            downloads::confirm(item.id);
+                        }
+                        if ui.small_button("Cancel").clicked() {
+                            downloads::cancel(item.id);
+                        }
+                    });
+                },
+                State::Running => {
+                    let fraction = item
+                        .total
+                        .filter(|total| *total > 0)
+                        .map(|total| (item.received as f32 / total as f32).clamp(0.0, 1.0));
+                    match fraction {
+                        Some(fraction) => {
+                            ui.add(egui::ProgressBar::new(fraction).desired_height(8.0));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} of {}",
+                                    downloads::format_bytes(item.received),
+                                    downloads::format_bytes(item.total.unwrap_or(0))
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        },
+                        None => {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} downloaded",
+                                    downloads::format_bytes(item.received)
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        },
+                    }
+                    if ui.small_button("Cancel").clicked() {
+                        downloads::cancel(item.id);
+                    }
+                },
+                State::Done => {
+                    ui.label(
+                        RichText::new(format!("Done, {}", downloads::format_bytes(item.received)))
+                            .small()
+                            .color(Color32::from_rgb(70, 160, 90)),
+                    );
+                    ui.horizontal(|ui| {
+                        if !item.dangerous && ui.small_button("Open").clicked() {
+                            downloads::open_file(item);
+                        }
+                        if ui.small_button("Show in folder").clicked() {
+                            downloads::show_in_folder(&item.path);
+                        }
+                        if ui.small_button("\u{2212}").on_hover_text("Remove from list").clicked() {
+                            downloads::remove(item.id);
+                        }
+                    });
+                },
+                State::Failed(reason) => {
+                    ui.label(RichText::new(reason.clone()).small().color(Color32::from_rgb(220, 90, 80)));
+                    if ui.small_button("Remove").clicked() {
+                        downloads::remove(item.id);
+                    }
+                },
+                State::Cancelled => {
+                    ui.label(RichText::new("Cancelled").small().weak());
+                    if ui.small_button("Remove").clicked() {
+                        downloads::remove(item.id);
+                    }
+                },
+            }
+        });
+    }
+}
+
+fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Action>) {
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let close_rect = Rect::from_min_size(
+        pos2(rect.max.x - 26.0, rect.min.y + 2.0),
+        vec2(24.0, ROW_HEIGHT - 4.0),
+    );
+    let close = ui.interact(close_rect, response.id.with("close"), Sense::click());
+    let row_hovered = ui.rect_contains_pointer(rect);
+
+    let visuals = ui.visuals();
+    let fill = if tab.active {
+        Some(visuals.widgets.active.weak_bg_fill)
+    } else if row_hovered {
+        Some(visuals.widgets.hovered.weak_bg_fill)
+    } else {
+        None
+    };
+    let text_color = visuals.text_color();
+    let painter = ui.painter();
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, 6.0, fill);
+    }
+    if let Some(favicon) = tab.favicon {
+        let icon_rect = Rect::from_min_size(pos2(rect.min.x + 6.0, rect.center().y - 8.0), vec2(16.0, 16.0));
+        painter.image(
+            favicon.id,
+            icon_rect,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+    let text_clip = Rect::from_min_max(rect.min, pos2(rect.max.x - 28.0, rect.max.y));
+    painter.with_clip_rect(text_clip).text(
+        pos2(rect.min.x + 30.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        &tab.label,
+        FontId::proportional(13.0),
+        text_color,
+    );
+    if tab.pinned {
+        // A pinned tab shows a pin instead of a close button; clicking it unpins.
+        pin_glyph(painter, close_rect.center(), text_color, row_hovered);
+    } else if row_hovered {
+        painter.text(
+            close_rect.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            FontId::proportional(16.0),
+            text_color,
+        );
+    }
+
+    if tab.pinned {
+        if close.clicked() {
+            actions.push(Action::TogglePin(index));
+        } else if response.clicked() && !tab.active {
+            actions.push(Action::Activate(index));
+        }
+    } else if close.clicked() || close.middle_clicked() || response.middle_clicked() {
+        actions.push(Action::Close(index));
+    } else if response.clicked() && !tab.active {
+        actions.push(Action::Activate(index));
+    }
+    response.context_menu(|ui| {
+        let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
+        if ui.button(pin_label).clicked() {
+            actions.push(Action::TogglePin(index));
+            ui.close();
+        }
+        if ui.button("Close tab").clicked() {
+            if tab.pinned {
+                actions.push(Action::TogglePin(index));
+            }
+            actions.push(Action::Close(index));
+            ui.close();
+        }
+    });
+}
+
+/// The list of matching pages under the address bar. Rows react to the mouse *press*, because
+/// the address bar loses focus (and this list disappears) before the button is released.
+fn suggestion_popup(
+    ctx: &Context,
+    field: Rect,
+    suggestions: &[crate::library::Suggestion],
+    location_dirty: &mut bool,
+    actions: &mut Vec<Action>,
+) {
+    Area::new(Id::new("pteron_suggestions"))
+        .order(Order::Tooltip)
+        .fixed_pos(field.left_bottom() + vec2(0.0, 2.0))
+        .show(ctx, |ui| {
+            Frame::popup(ui.style()).inner_margin(4.0).show(ui, |ui| {
+                ui.set_width(field.width() - 8.0);
+                for suggestion in suggestions {
+                    let (rect, response) =
+                        ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+                    let visuals = ui.visuals();
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(rect, 5.0, visuals.widgets.hovered.weak_bg_fill);
+                    }
+                    let text_color = visuals.text_color();
+                    let weak = visuals.weak_text_color();
+                    let title = if suggestion.title.is_empty() {
+                        suggestion.url.as_str()
+                    } else {
+                        suggestion.title.as_str()
+                    };
+                    let clip = ui.painter().with_clip_rect(rect.shrink2(vec2(4.0, 0.0)));
+                    clip.text(
+                        pos2(rect.min.x + 8.0, rect.min.y + 11.0),
+                        Align2::LEFT_CENTER,
+                        title,
+                        FontId::proportional(13.0),
+                        text_color,
+                    );
+                    clip.text(
+                        pos2(rect.min.x + 8.0, rect.min.y + 27.0),
+                        Align2::LEFT_CENTER,
+                        &suggestion.url,
+                        FontId::proportional(11.0),
+                        weak,
+                    );
+                    let pressed = ui.input(|input| input.pointer.primary_pressed());
+                    if pressed && response.hovered() {
+                        *location_dirty = false;
+                        actions.push(Action::Go(suggestion.url.clone()));
+                    }
+                }
+            });
+        });
+}
+
+/// A bookmark: click opens it here, middle-click opens it in a new tab.
+fn bookmark_row(ui: &mut egui::Ui, index: usize, bookmark: &BookmarkRow, actions: &mut Vec<Action>) {
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let visuals = ui.visuals();
+    let fill = response
+        .hovered()
+        .then_some(visuals.widgets.hovered.weak_bg_fill);
+    let text_color = visuals.text_color();
+    let painter = ui.painter();
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, 6.0, fill);
+    }
+    painter.with_clip_rect(rect).text(
+        pos2(rect.min.x + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        &bookmark.label,
+        FontId::proportional(13.0),
+        text_color,
+    );
+    if response.middle_clicked() {
+        actions.push(Action::OpenBookmarkInNewTab(index));
+    } else if response.clicked() {
+        actions.push(Action::OpenBookmark(index));
+    }
+    let response = response.on_hover_text(&bookmark.url);
+    response.context_menu(|ui| {
+        if ui.button("Open in new tab").clicked() {
+            actions.push(Action::OpenBookmarkInNewTab(index));
+            ui.close();
+        }
+        if ui.button("Remove bookmark").clicked() {
+            actions.push(Action::RemoveBookmark(index));
+            ui.close();
+        }
+    });
+}
+
+/// A small pin, drawn with the painter. Filled when `strong`.
+fn pin_glyph(painter: &egui::Painter, center: Pos2, color: Color32, strong: bool) {
+    let color = if strong { color } else { color.gamma_multiply(0.6) };
+    painter.circle_filled(center + vec2(0.0, -3.0), 3.2, color);
+    painter.line_segment(
+        [center + vec2(0.0, -1.0), center + vec2(0.0, 6.0)],
+        Stroke::new(1.4_f32, color),
+    );
+}
+
+fn sleeping_row(ui: &mut egui::Ui, index: usize, tab: &SleepingRow, actions: &mut Vec<Action>) {
+    let label = tab.label.as_str();
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let visuals = ui.visuals();
+    let fill = response
+        .hovered()
+        .then_some(visuals.widgets.hovered.weak_bg_fill);
+    let text_color = visuals.weak_text_color();
+    let painter = ui.painter();
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, 6.0, fill);
+    }
+    painter.with_clip_rect(rect).text(
+        pos2(rect.min.x + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        format!("zZ  {label}"),
+        FontId::proportional(13.0),
+        text_color,
+    );
+    if response.middle_clicked() {
+        actions.push(Action::CloseSleeping(index));
+    } else if response.clicked() {
+        actions.push(Action::Wake(index));
+    }
+    if tab.pinned {
+        pin_glyph(
+            painter,
+            pos2(rect.max.x - 14.0, rect.center().y),
+            text_color,
+            false,
+        );
+    }
+    response.context_menu(|ui| {
+        let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
+        if ui.button(pin_label).clicked() {
+            actions.push(Action::TogglePinSleeping(index));
+            ui.close();
+        }
+        if ui.button("Close tab").clicked() {
+            actions.push(Action::CloseSleeping(index));
+            ui.close();
+        }
+    });
+}
+

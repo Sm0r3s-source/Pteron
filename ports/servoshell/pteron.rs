@@ -1,0 +1,475 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+//! Pteron: product name and user settings (currently: the search engine).
+//! Settings live in `<config dir>/Pteron/settings.json`.
+
+use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
+
+use log::warn;
+
+pub(crate) const APP_NAME: &str = "Pteron";
+pub(crate) const APP_VERSION: &str = "0.1";
+
+/// Built-in search engines: (id, label, URL template where `%s` is the query).
+pub(crate) const ENGINES: &[(&str, &str, &str)] = &[
+    ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/html/?q=%s"),
+    ("google", "Google", "https://www.google.com/search?q=%s"),
+    ("bing", "Bing", "https://www.bing.com/search?q=%s"),
+    ("brave", "Brave Search", "https://search.brave.com/search?q=%s"),
+    ("startpage", "Startpage", "https://www.startpage.com/do/search?q=%s"),
+];
+
+/// Id of the "my own SearXNG instance" entry.
+pub(crate) const SEARXNG_ID: &str = "searxng";
+const DEFAULT_ENGINE: &str = "duckduckgo";
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Settings {
+    /// One of the ids in [`ENGINES`], or [`SEARXNG_ID`].
+    pub engine: String,
+    /// Address of the user's SearXNG instance (used when `engine` is [`SEARXNG_ID`]).
+    pub searxng_url: String,
+    /// "system", "light" or "dark".
+    pub theme: String,
+    /// Minutes before an unused background tab is put to sleep. 0 turns sleeping off.
+    pub tab_sleep_minutes: u32,
+    /// Keep the sidebar visible all the time instead of sliding in from the left edge.
+    pub sidebar_pinned: bool,
+    /// What to open at launch: "newtab", "restore" (last session) or "custom" (`homepage_url`).
+    pub startup: String,
+    /// Page opened at launch when `startup` is "custom".
+    pub homepage_url: String,
+    /// Remember visited pages (for address bar suggestions and new tab shortcuts).
+    pub history_enabled: bool,
+    /// Play YouTube videos in Pteron's own simple player (search, channels and videos).
+    pub youtube_player: bool,
+    /// Use the graphics card to decode video (takes effect after restart).
+    pub hw_video_decode: bool,
+    /// Long YouTube videos start from their first two minutes and switch to the whole video.
+    pub fast_start: bool,
+    /// Tiles on the new tab page: "off", "bookmarks" or "frequent" (bookmarks + most visited).
+    pub newtab_tiles: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            engine: DEFAULT_ENGINE.to_string(),
+            searxng_url: String::new(),
+            theme: "system".to_string(),
+            tab_sleep_minutes: 5,
+            sidebar_pinned: false,
+            startup: "newtab".to_string(),
+            homepage_url: String::new(),
+            history_enabled: true,
+            youtube_player: true,
+            hw_video_decode: true,
+            fast_start: true,
+            newtab_tiles: "off".to_string(),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn settings_path() -> Option<PathBuf> {
+    ::dirs::config_dir().map(|dir| dir.join(APP_NAME).join("settings.json"))
+}
+
+#[cfg(any(target_os = "android", target_env = "ohos"))]
+fn settings_path() -> Option<PathBuf> {
+    None
+}
+
+fn load_from_disk() -> Settings {
+    let mut settings = Settings::default();
+    let Some(path) = settings_path() else {
+        return settings;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return settings;
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => {
+            if let Some(engine) = value.get("engine").and_then(|v| v.as_str()) {
+                settings.engine = engine.to_string();
+            }
+            if let Some(url) = value.get("searxng_url").and_then(|v| v.as_str()) {
+                settings.searxng_url = url.to_string();
+            }
+            if let Some(theme) = value.get("theme").and_then(|v| v.as_str()) {
+                settings.theme = theme.to_string();
+            }
+            if let Some(minutes) = value.get("tab_sleep_minutes").and_then(|v| v.as_u64()) {
+                settings.tab_sleep_minutes = minutes.min(24 * 60) as u32;
+            }
+            if let Some(pinned) = value.get("sidebar_pinned").and_then(|v| v.as_bool()) {
+                settings.sidebar_pinned = pinned;
+            }
+            if let Some(startup) = value.get("startup").and_then(|v| v.as_str()) &&
+                matches!(startup, "newtab" | "restore" | "custom")
+            {
+                settings.startup = startup.to_string();
+            }
+            if let Some(url) = value.get("homepage_url").and_then(|v| v.as_str()) {
+                settings.homepage_url = url.to_string();
+            }
+            if let Some(enabled) = value.get("history_enabled").and_then(|v| v.as_bool()) {
+                settings.history_enabled = enabled;
+            }
+            if let Some(enabled) = value.get("youtube_player").and_then(|v| v.as_bool()) {
+                settings.youtube_player = enabled;
+            }
+            if let Some(enabled) = value.get("fast_start").and_then(|v| v.as_bool()) {
+                settings.fast_start = enabled;
+            }
+            if let Some(enabled) = value.get("hw_video_decode").and_then(|v| v.as_bool()) {
+                settings.hw_video_decode = enabled;
+            }
+            if let Some(tiles) = value.get("newtab_tiles").and_then(|v| v.as_str()) &&
+                matches!(tiles, "off" | "bookmarks" | "frequent")
+            {
+                settings.newtab_tiles = tiles.to_string();
+            }
+        },
+        Err(error) => warn!("Could not read {}: {error}", path.display()),
+    }
+    settings
+}
+
+fn store() -> &'static RwLock<Settings> {
+    static STORE: OnceLock<RwLock<Settings>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(load_from_disk()))
+}
+
+/// The current settings.
+pub(crate) fn settings() -> Settings {
+    store().read().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Minutes before background tabs sleep (cheap: no cloning).
+pub(crate) fn tab_sleep_minutes() -> u32 {
+    store().read().map(|s| s.tab_sleep_minutes).unwrap_or(5)
+}
+
+/// Replace the settings and save them to disk.
+pub(crate) fn update(new_settings: Settings) {
+    if let Ok(mut current) = store().write() {
+        *current = new_settings.clone();
+    }
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let json = serde_json::json!({
+        "engine": new_settings.engine,
+        "searxng_url": new_settings.searxng_url,
+        "theme": new_settings.theme,
+        "tab_sleep_minutes": new_settings.tab_sleep_minutes,
+        "sidebar_pinned": new_settings.sidebar_pinned,
+        "startup": new_settings.startup,
+        "homepage_url": new_settings.homepage_url,
+        "history_enabled": new_settings.history_enabled,
+        "youtube_player": new_settings.youtube_player,
+        "hw_video_decode": new_settings.hw_video_decode,
+        "fast_start": new_settings.fast_start,
+        "newtab_tiles": new_settings.newtab_tiles,
+    });
+    if let Err(error) = std::fs::write(&path, json.to_string()) {
+        warn!("Could not save {}: {error}", path.display());
+    }
+}
+
+/// One tab of the saved session.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SavedTab {
+    pub url: String,
+    pub title: String,
+    pub pinned: bool,
+    pub active: bool,
+}
+
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+fn session_path() -> Option<PathBuf> {
+    ::dirs::config_dir().map(|dir| dir.join(APP_NAME).join("session.json"))
+}
+
+#[cfg(any(target_os = "android", target_env = "ohos"))]
+fn session_path() -> Option<PathBuf> {
+    None
+}
+
+/// The tabs saved by the last run (empty if there are none).
+pub(crate) fn load_session() -> Vec<SavedTab> {
+    let Some(path) = session_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        warn!("Could not read {}", path.display());
+        return Vec::new();
+    };
+    value
+        .get("tabs")
+        .and_then(|tabs| tabs.as_array())
+        .map(|tabs| {
+            tabs.iter()
+                .filter_map(|tab| {
+                    let url = tab.get("url")?.as_str()?.to_string();
+                    Some(SavedTab {
+                        url,
+                        title: tab
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        pinned: tab.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
+                        active: tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Save the open tabs. Does nothing if they are the same as the last save.
+pub(crate) fn save_session(tabs: &[SavedTab]) {
+    static LAST: OnceLock<RwLock<String>> = OnceLock::new();
+    let Some(path) = session_path() else {
+        return;
+    };
+    let json = serde_json::json!({
+        "tabs": tabs.iter().map(|tab| serde_json::json!({
+            "url": tab.url,
+            "title": tab.title,
+            "pinned": tab.pinned,
+            "active": tab.active,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let last = LAST.get_or_init(|| RwLock::new(String::new()));
+    if last.read().map(|last| *last == json).unwrap_or(false) {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, &json) {
+        warn!("Could not save {}: {error}", path.display());
+        return;
+    }
+    if let Ok(mut last) = last.write() {
+        *last = json;
+    }
+}
+
+/// Forget the saved session.
+pub(crate) fn clear_session() {
+    if let Some(path) = session_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// What to open when the app starts, besides what the address on the command line says.
+pub(crate) struct StartupPlan {
+    /// Replaces the default first tab (only when "continue where I left off" applies).
+    pub first: Option<SavedTab>,
+    /// Tabs to bring back asleep (they load when clicked).
+    pub rest: Vec<SavedTab>,
+}
+
+pub(crate) fn startup_plan(address_given: bool) -> StartupPlan {
+    let restore = settings().startup == "restore";
+    let mut wanted: Vec<SavedTab> = load_session()
+        .into_iter()
+        .filter(|tab| restore || tab.pinned)
+        .collect();
+    let mut first = None;
+    if restore && !address_given && !wanted.is_empty() {
+        let index = wanted.iter().position(|tab| tab.active).unwrap_or(0);
+        first = Some(wanted.remove(index));
+    }
+    StartupPlan { first, rest: wanted }
+}
+
+/// The search URL template (with `%s` for the query) for the given settings.
+pub(crate) fn search_url_for(settings: &Settings) -> String {
+    let builtin = |id: &str| {
+        ENGINES
+            .iter()
+            .find(|(engine_id, ..)| *engine_id == id)
+            .map(|(.., template)| template.to_string())
+    };
+    if settings.engine == SEARXNG_ID {
+        let address = settings.searxng_url.trim();
+        if address.is_empty() {
+            return builtin(DEFAULT_ENGINE).unwrap_or_default();
+        }
+        let address = if address.starts_with("http://") || address.starts_with("https://") {
+            address.to_string()
+        } else {
+            format!("https://{address}")
+        };
+        if address.contains("%s") {
+            return address;
+        }
+        return format!("{}/search?q=%s", address.trim_end_matches('/'));
+    }
+    builtin(&settings.engine)
+        .or_else(|| builtin(DEFAULT_ENGINE))
+        .unwrap_or_default()
+}
+
+/// Where the settings file lives, for display in the About page.
+pub(crate) fn settings_file_path() -> String {
+    settings_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
+
+/// The search URL template for the current settings.
+pub(crate) fn search_url() -> String {
+    search_url_for(&settings())
+}
+
+/// Percent-encode a search query.
+pub(crate) fn encode_query(query: &str) -> String {
+    url::form_urlencoded::byte_serialize(query.as_bytes()).collect()
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Display name of the chosen search engine.
+fn engine_label(settings: &Settings) -> String {
+    if settings.engine == SEARXNG_ID {
+        return "SearXNG".to_string();
+    }
+    ENGINES
+        .iter()
+        .find(|(id, ..)| *id == settings.engine)
+        .map(|(_, label, _)| label.to_string())
+        .unwrap_or_else(|| "the web".to_string())
+}
+
+/// Tiles for the pages the user bookmarked or visits most.
+fn shortcuts_html() -> String {
+    let mut html = String::new();
+    let mode = settings().newtab_tiles;
+    if mode == "off" {
+        return html;
+    }
+    for suggestion in crate::library::shortcuts(8, mode == "frequent") {
+        let host = url::Url::parse(&suggestion.url)
+            .ok()
+            .and_then(|url| url.host_str().map(|host| host.trim_start_matches("www.").to_string()))
+            .unwrap_or_default();
+        let letter = host
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "·".to_string());
+        let name = if suggestion.title.is_empty() {
+            host.clone()
+        } else {
+            suggestion.title.clone()
+        };
+        html.push_str(&format!(
+            "<a class=\"tile\" href=\"{}\"><span class=\"ico\">{}</span><span class=\"name\">{}</span></a>",
+            html_escape(&suggestion.url),
+            html_escape(&letter),
+            html_escape(&name),
+        ));
+    }
+    html
+}
+
+/// The HTML of the new-tab page, with its search box wired to the chosen engine.
+pub(crate) fn newtab_html() -> String {
+    let template = search_url();
+    let (action, query) = template.split_once('?').unwrap_or((template.as_str(), ""));
+    let mut query_name = "q";
+    let mut hidden = String::new();
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if value == "%s" {
+                query_name = key;
+            } else {
+                hidden.push_str(&format!(
+                    "<input type=\"hidden\" name=\"{}\" value=\"{}\" />",
+                    html_escape(key),
+                    html_escape(value)
+                ));
+            }
+        }
+    }
+    include_str!("../../resources/resource_protocol/newtab.html")
+        .replace("{{FORM_ACTION}}", &html_escape(action))
+        .replace("{{HIDDEN_INPUTS}}", &hidden)
+        .replace("{{QUERY_NAME}}", &html_escape(query_name))
+        .replace("{{ENGINE_NAME}}", &html_escape(&engine_label(&settings())))
+        .replace("{{SHORTCUTS}}", &shortcuts_html())
+}
+
+
+// ---------------------------------------------------------------------------
+// Popup blocking: a page may only open a new window shortly after the user
+// clicked or pressed a key. Servo does not tell the shell whether a
+// `window.open()` came from a user gesture, so the shell tracks it itself.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
+
+static CLOCK: OnceLock<Instant> = OnceLock::new();
+static LAST_GESTURE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_BLOCKED_MS: AtomicU64 = AtomicU64::new(0);
+static BLOCKED_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// How long after a click or key press a page may still open a window.
+const GESTURE_WINDOW_MS: u64 = 2000;
+/// How long the "popup blocked" notice stays on screen.
+const NOTICE_MS: u64 = 4000;
+
+fn now_ms() -> u64 {
+    CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Call on every mouse press / key press that reaches the window.
+pub(crate) fn note_user_gesture() {
+    LAST_GESTURE_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Whether a page may open a new window right now.
+pub(crate) fn popup_allowed() -> bool {
+    let last = LAST_GESTURE_MS.load(Ordering::Relaxed);
+    last != 0 && now_ms().saturating_sub(last) <= GESTURE_WINDOW_MS
+}
+
+/// Whether the user clicked or pressed a key within the last `ms` milliseconds.
+pub(crate) fn gesture_within(ms: u64) -> bool {
+    let last = LAST_GESTURE_MS.load(Ordering::Relaxed);
+    last != 0 && now_ms().saturating_sub(last) <= ms
+}
+
+pub(crate) fn note_popup_blocked() {
+    BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_BLOCKED_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// `Some(count)` while the "popup blocked" notice should be visible.
+pub(crate) fn popup_notice() -> Option<u32> {
+    let last = LAST_BLOCKED_MS.load(Ordering::Relaxed);
+    (last != 0 && now_ms().saturating_sub(last) <= NOTICE_MS)
+        .then(|| BLOCKED_COUNT.load(Ordering::Relaxed))
+}
