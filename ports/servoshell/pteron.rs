@@ -54,6 +54,14 @@ pub(crate) struct Settings {
     pub newtab_tiles: String,
     /// The welcome page has been shown once.
     pub welcome_shown: bool,
+    /// Colour theme: an id from `appearance::PRESETS` or "custom".
+    pub accent: String,
+    /// Colour used when `accent` is "custom" (#rrggbb).
+    pub accent_custom: String,
+    /// New tab background: "theme", "gradient", "color" or "picture".
+    pub newtab_bg: String,
+    /// Colour used when `newtab_bg` is "color" (#rrggbb).
+    pub newtab_color: String,
 }
 
 impl Default for Settings {
@@ -72,6 +80,10 @@ impl Default for Settings {
             fast_start: true,
             newtab_tiles: "off".to_string(),
             welcome_shown: false,
+            accent: "gold".to_string(),
+            accent_custom: "#d6aa48".to_string(),
+            newtab_bg: "theme".to_string(),
+            newtab_color: "#1b1c1e".to_string(),
         }
     }
 }
@@ -134,6 +146,26 @@ fn load_from_disk() -> Settings {
             if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
                 settings.welcome_shown = shown;
             }
+            if let Some(accent) = value.get("accent").and_then(|v| v.as_str()) &&
+                (accent == "custom" || crate::appearance::PRESETS.iter().any(|(id, ..)| *id == accent))
+            {
+                settings.accent = accent.to_string();
+            }
+            if let Some(color) = value.get("accent_custom").and_then(|v| v.as_str()) &&
+                crate::appearance::parse_hex(color).is_some()
+            {
+                settings.accent_custom = color.to_string();
+            }
+            if let Some(bg) = value.get("newtab_bg").and_then(|v| v.as_str()) &&
+                matches!(bg, "theme" | "gradient" | "color" | "picture")
+            {
+                settings.newtab_bg = bg.to_string();
+            }
+            if let Some(color) = value.get("newtab_color").and_then(|v| v.as_str()) &&
+                crate::appearance::parse_hex(color).is_some()
+            {
+                settings.newtab_color = color.to_string();
+            }
             if let Some(tiles) = value.get("newtab_tiles").and_then(|v| v.as_str()) &&
                 matches!(tiles, "off" | "bookmarks" | "frequent")
             {
@@ -185,6 +217,10 @@ pub(crate) fn update(new_settings: Settings) {
         "fast_start": new_settings.fast_start,
         "newtab_tiles": new_settings.newtab_tiles,
         "welcome_shown": new_settings.welcome_shown,
+        "accent": new_settings.accent,
+        "accent_custom": new_settings.accent_custom,
+        "newtab_bg": new_settings.newtab_bg,
+        "newtab_color": new_settings.newtab_color,
     });
     if let Err(error) = std::fs::write(&path, json.to_string()) {
         warn!("Could not save {}: {error}", path.display());
@@ -426,6 +462,7 @@ pub(crate) fn newtab_html() -> String {
         .replace("{{QUERY_NAME}}", &html_escape(query_name))
         .replace("{{ENGINE_NAME}}", &html_escape(&engine_label(&settings())))
         .replace("{{SHORTCUTS}}", &shortcuts_html())
+        .replace("{{THEME_STYLE}}", &crate::appearance::newtab_style(&settings()))
 }
 
 

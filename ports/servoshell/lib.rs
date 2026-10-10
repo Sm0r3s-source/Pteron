@@ -19,6 +19,7 @@ mod egl;
 mod panic_hook;
 mod parser;
 mod prefs;
+mod appearance;
 mod crashlog;
 mod downloads;
 mod library;

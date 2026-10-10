@@ -137,6 +137,104 @@ pub(crate) fn location_focused(ctx: &Context) -> bool {
     ctx.memory(|memory| memory.has_focus(Id::new(LOCATION_ID)))
 }
 
+/// The accent colour of the chosen colour theme.
+fn accent_color() -> Color32 {
+    let [r, g, b] = crate::appearance::current_accent();
+    Color32::from_rgb(r, g, b)
+}
+
+/// `base` with a little of `tint` mixed in (`amount` 0.0 to 1.0).
+fn tinted(base: Color32, tint: Color32, amount: f32) -> Color32 {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    Color32::from_rgb(mix(base.r(), tint.r()), mix(base.g(), tint.g()), mix(base.b(), tint.b()))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Glyph {
+    Previous,
+    Next,
+    Play,
+    Pause,
+}
+
+/// A round media button with its symbol drawn by the painter. `main` is the big filled one.
+fn media_button(ui: &mut egui::Ui, glyph: Glyph, main: bool, accent: Color32) -> egui::Response {
+    let size = if main { 34.0 } else { 28.0 };
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let painter = ui.painter();
+    let center = rect.center();
+    let radius = size / 2.0;
+    let (fill, ink) = if main {
+        let fill = if response.hovered() { accent } else { accent.gamma_multiply(0.9) };
+        (fill, Color32::from_rgb(24, 24, 26))
+    } else {
+        let fill = if response.hovered() {
+            accent.gamma_multiply(0.30)
+        } else {
+            accent.gamma_multiply(0.14)
+        };
+        (fill, ui.visuals().text_color())
+    };
+    painter.circle_filled(center, radius, fill);
+    let u = size / 34.0 * 6.5;
+    let triangle = |tip_x: f32, back_x: f32| {
+        Shape::convex_polygon(
+            vec![
+                center + vec2(tip_x, 0.0),
+                center + vec2(back_x, -u),
+                center + vec2(back_x, u),
+            ],
+            ink,
+            Stroke::NONE,
+        )
+    };
+    match glyph {
+        Glyph::Play => {
+            painter.add(triangle(u * 1.0 + 1.0, -u * 0.8 + 1.0));
+        },
+        Glyph::Pause => {
+            for dx in [-u * 0.55, u * 0.55] {
+                painter.rect_filled(
+                    Rect::from_center_size(center + vec2(dx, 0.0), vec2(u * 0.55, u * 1.8)),
+                    1.5,
+                    ink,
+                );
+            }
+        },
+        Glyph::Next => {
+            painter.add(triangle(u * 0.8, -u * 0.7));
+            painter.rect_filled(
+                Rect::from_center_size(center + vec2(u * 0.95, 0.0), vec2(u * 0.35, u * 1.7)),
+                1.0,
+                ink,
+            );
+        },
+        Glyph::Previous => {
+            painter.add(triangle(-u * 0.8, u * 0.7));
+            painter.rect_filled(
+                Rect::from_center_size(center + vec2(-u * 0.95, 0.0), vec2(u * 0.35, u * 1.7)),
+                1.0,
+                ink,
+            );
+        },
+    }
+    response
+}
+
+/// Three little bars, like a sound level meter.
+fn equalizer_icon(ui: &mut egui::Ui, accent: Color32, playing: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    let heights: [f32; 3] = if playing { [9.0, 14.0, 7.0] } else { [5.0, 5.0, 5.0] };
+    for (i, h) in heights.iter().enumerate() {
+        let x = rect.min.x + 2.0 + i as f32 * 5.0;
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(x, rect.max.y - h), pos2(x + 3.0, rect.max.y)),
+            1.5,
+            accent,
+        );
+    }
+}
+
 /// A star (outlined, or filled when the page is bookmarked), drawn with the painter.
 fn star_button(ui: &mut egui::Ui, filled: bool, enabled: bool) -> egui::Response {
     let sense = if enabled { Sense::click() } else { Sense::hover() };
@@ -145,7 +243,7 @@ fn star_button(ui: &mut egui::Ui, filled: bool, enabled: bool) -> egui::Response
         ui.painter()
             .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
-    let gold = Color32::from_rgb(0xd6, 0xaa, 0x48);
+    let gold = accent_color();
     let color = if !enabled {
         ui.visuals().weak_text_color()
     } else if filled {
@@ -223,7 +321,7 @@ pub(crate) fn show(
     if ui.ctx().global_style().visuals.text_cursor.blink {
         ui.ctx().global_style_mut(|style| {
             style.visuals.text_cursor.blink = false;
-            style.visuals.text_cursor.stroke = Stroke::new(2.0, Color32::from_rgb(214, 170, 72));
+            style.visuals.text_cursor.stroke = Stroke::new(2.0, accent_color());
         });
     }
     if state.pinned {
@@ -262,7 +360,7 @@ fn framed(
     {
         {
             Frame::default()
-                .fill(ui.visuals().window_fill)
+                .fill(tinted(ui.visuals().window_fill, accent_color(), 0.06))
                 .stroke(ui.visuals().window_stroke)
                 .inner_margin(margin)
                 .show(ui, |ui| {
@@ -378,30 +476,48 @@ fn framed(
                     }
                     // Pteron: what Plume Music is playing, with simple controls.
                     if let Some(now) = crate::music::now_playing() {
-                        ui.add_space(6.0);
-                        Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_width(inner_width - 14.0);
-                            let title: String = if now.title.chars().count() > 38 {
-                                now.title.chars().take(37).chain(std::iter::once('\u{2026}')).collect()
-                            } else {
-                                now.title.clone()
-                            };
-                            ui.label(RichText::new(title).small());
-                            ui.horizontal(|ui| {
-                                if ui.small_button("|<").on_hover_text("Previous song").clicked() {
-                                    crate::music::send_command("prev");
-                                }
-                                if ui
-                                    .small_button(if now.playing { "Pause" } else { "Play" })
-                                    .clicked()
-                                {
-                                    crate::music::send_command("toggle");
-                                }
-                                if ui.small_button(">|").on_hover_text("Next song").clicked() {
-                                    crate::music::send_command("next");
-                                }
+                        let accent = accent_color();
+                        ui.add_space(8.0);
+                        Frame::new()
+                            .fill(tinted(ui.visuals().window_fill, accent, 0.12))
+                            .stroke(Stroke::new(1.0, accent.gamma_multiply(0.35)))
+                            .corner_radius(12.0)
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                ui.set_width(inner_width - 22.0);
+                                ui.horizontal(|ui| {
+                                    equalizer_icon(ui, accent, now.playing);
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&now.title).strong().size(13.0))
+                                            .truncate(),
+                                    );
+                                });
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    // Centre the three buttons.
+                                    let used = 28.0 + 34.0 + 28.0 + 2.0 * ui.spacing().item_spacing.x * 1.0;
+                                    ui.add_space(((ui.available_width() - used) / 2.0).max(0.0));
+                                    if media_button(ui, Glyph::Previous, false, accent)
+                                        .on_hover_text("Previous song")
+                                        .clicked()
+                                    {
+                                        crate::music::send_command("prev");
+                                    }
+                                    let glyph = if now.playing { Glyph::Pause } else { Glyph::Play };
+                                    if media_button(ui, glyph, true, accent)
+                                        .on_hover_text(if now.playing { "Pause" } else { "Play" })
+                                        .clicked()
+                                    {
+                                        crate::music::send_command("toggle");
+                                    }
+                                    if media_button(ui, Glyph::Next, false, accent)
+                                        .on_hover_text("Next song")
+                                        .clicked()
+                                    {
+                                        crate::music::send_command("next");
+                                    }
+                                });
                             });
-                        });
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
                     }
                     ui.add_space(6.0);

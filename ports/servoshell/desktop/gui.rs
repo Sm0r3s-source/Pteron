@@ -260,7 +260,7 @@ impl Gui {
             // since it is the more common default.
             options.fallback_theme = egui::Theme::Light;
         });
-        apply_theme(&context.egui_ctx, &pteron::settings().theme);
+        apply_theme(&context.egui_ctx, &pteron::settings());
 
         Self {
             rendering_context,
@@ -879,8 +879,18 @@ impl Gui {
             // (A pinned sidebar is a panel, so the page area already starts next to it.)
             let page_area = ctx.available_rect_before_wrap();
             if settings_page::show(ctx, settings_page, settings, page_area) {
-                apply_theme(ctx, &settings.theme);
+                apply_theme(ctx, settings);
                 pteron::update(settings.clone());
+            }
+            if let Some(result) = crate::appearance::take_picked() {
+                settings_page.notice = Some(match result {
+                    Ok(()) => {
+                        settings.newtab_bg = "picture".to_string();
+                        pteron::update(settings.clone());
+                        "Picture saved. Open a new tab to see it.".to_string()
+                    },
+                    Err(message) => message,
+                });
             }
             for action in std::mem::take(&mut settings_page.pending) {
                 settings_page.notice = Some(match action {
@@ -931,6 +941,10 @@ impl Gui {
                         Ok(1) => "Imported 1 bookmark.".to_string(),
                         Ok(count) => format!("Imported {count} bookmarks."),
                         Err(message) => message,
+                    },
+                    settings_page::PageAction::ChoosePicture => {
+                        crate::appearance::choose_picture_async();
+                        "Choose a picture in the window that opens.".to_string()
                     },
                     settings_page::PageAction::OpenKnownIssues => {
                         if let Ok(url) = Url::parse("servo:known-issues") {
@@ -1311,11 +1325,21 @@ fn embedder_image_to_egui_image(image: &Image) -> egui::ColorImage {
 
 /// Uploads all favicons that have not yet been processed to the GPU.
 /// Pteron: apply the theme setting ("system", "light" or "dark").
-fn apply_theme(ctx: &egui::Context, theme: &str) {
-    ctx.set_theme(match theme {
+fn apply_theme(ctx: &egui::Context, settings: &pteron::Settings) {
+    ctx.set_theme(match settings.theme.as_str() {
         "light" => egui::ThemePreference::Light,
         "dark" => egui::ThemePreference::Dark,
         _ => egui::ThemePreference::System,
+    });
+    // Pteron: the colour theme tints selections, links, the typing cursor and hovered outlines.
+    let [r, g, b] = crate::appearance::accent_rgb(settings);
+    let accent = egui::Color32::from_rgb(r, g, b);
+    ctx.all_styles_mut(|style| {
+        style.visuals.selection.bg_fill = accent.gamma_multiply(0.35);
+        style.visuals.selection.stroke.color = accent;
+        style.visuals.hyperlink_color = accent;
+        style.visuals.text_cursor.stroke.color = accent;
+        style.visuals.widgets.hovered.bg_stroke.color = accent.gamma_multiply(0.7);
     });
 }
 

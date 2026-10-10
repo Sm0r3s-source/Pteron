@@ -69,6 +69,8 @@ pub(crate) enum PageAction {
     ExportBookmarks,
     /// Import the newest bookmark file found on the Desktop or in Downloads.
     ImportBookmarks,
+    /// Open the file chooser for the new tab background picture.
+    ChoosePicture,
 }
 
 #[derive(Default)]
@@ -97,7 +99,10 @@ pub(crate) fn show(
     }
     let mut changed = false;
     let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
-    let accent = Color32::from_rgb(0x3b, 0x82, 0xf6);
+    let accent = {
+        let [r, g, b] = crate::appearance::current_accent();
+        Color32::from_rgb(r, g, b)
+    };
 
     Area::new(Id::new("pteron_settings_page"))
         .order(Order::Middle)
@@ -190,7 +195,7 @@ pub(crate) fn show(
                                                     changed |= search_section(ui, settings)
                                                 },
                                                 Category::Appearance => {
-                                                    changed |= appearance_section(ui, settings)
+                                                    changed |= appearance_section(ui, settings, &mut page.pending, &page.notice)
                                                 },
                                                 Category::Startup => {
                                                     changed |= startup_section(ui, settings)
@@ -385,8 +390,109 @@ fn search_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
     changed
 }
 
-fn appearance_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
+/// A round colour sample; `selected` draws a ring around it.
+fn swatch(ui: &mut egui::Ui, rgb: [u8; 3], selected: bool, name: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+    let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    ui.painter().circle_filled(rect.center(), 11.0, color);
+    if selected {
+        ui.painter()
+            .circle_stroke(rect.center(), 14.0, egui::Stroke::new(2.0, ui.visuals().text_color()));
+    } else if response.hovered() {
+        ui.painter()
+            .circle_stroke(rect.center(), 13.0, egui::Stroke::new(1.5, color.gamma_multiply(0.6)));
+    }
+    response.on_hover_text(name)
+}
+
+fn appearance_section(
+    ui: &mut egui::Ui,
+    settings: &mut pteron::Settings,
+    pending: &mut Vec<PageAction>,
+    notice: &Option<String>,
+) -> bool {
     let mut changed = false;
+    card(
+        ui,
+        "Colour theme",
+        Some("The accent colour of the sidebar, buttons, selections and the new tab page."),
+        "color colour accent theme palette custom personalize",
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (id, name, rgb) in crate::appearance::PRESETS {
+                    if swatch(ui, rgb, settings.accent == id, name).clicked() {
+                        settings.accent = id.to_string();
+                        changed = true;
+                    }
+                }
+                let custom = crate::appearance::parse_hex(&settings.accent_custom).unwrap_or([0xd6, 0xaa, 0x48]);
+                if swatch(ui, custom, settings.accent == "custom", "Your own colour").clicked() {
+                    settings.accent = "custom".to_string();
+                    changed = true;
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let mut rgb = crate::appearance::parse_hex(&settings.accent_custom).unwrap_or([0xd6, 0xaa, 0x48]);
+                if ui.color_edit_button_srgb(&mut rgb).changed() {
+                    settings.accent_custom = crate::appearance::to_hex(rgb);
+                    settings.accent = "custom".to_string();
+                    changed = true;
+                }
+                ui.label(RichText::new("Pick your own colour").weak());
+            });
+        },
+    );
+    card(
+        ui,
+        "New tab background",
+        Some("What the page behind the search box looks like."),
+        "background wallpaper picture image homepage new tab color gradient",
+        |ui| {
+            changed |= radio(ui, &mut settings.newtab_bg, "theme", "Soft glow in the theme colour", None);
+            changed |= radio(ui, &mut settings.newtab_bg, "gradient", "Gradient in the theme colour", None);
+            changed |= radio(ui, &mut settings.newtab_bg, "color", "One colour", None);
+            if settings.newtab_bg == "color" {
+                ui.horizontal(|ui| {
+                    ui.add_space(26.0);
+                    let mut rgb = crate::appearance::parse_hex(&settings.newtab_color).unwrap_or([0x1b, 0x1c, 0x1e]);
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        settings.newtab_color = crate::appearance::to_hex(rgb);
+                        changed = true;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            changed |= radio(
+                ui,
+                &mut settings.newtab_bg,
+                "picture",
+                "My picture",
+                Some("JPG, PNG, WebP or GIF, up to 4 MB."),
+            );
+            if settings.newtab_bg == "picture" {
+                ui.horizontal(|ui| {
+                    ui.add_space(26.0);
+                    if crate::appearance::picking() {
+                        ui.label("Choosing...");
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                    } else if ui
+                        .button(if crate::appearance::has_picture() { "Change picture" } else { "Choose picture" })
+                        .clicked()
+                    {
+                        pending.push(PageAction::ChoosePicture);
+                    }
+                });
+                if !crate::appearance::has_picture() && !crate::appearance::picking() {
+                    ui.label(RichText::new("No picture chosen yet, so the soft glow is shown.").small().weak());
+                }
+            }
+            if let Some(notice) = notice {
+                ui.add_space(6.0);
+                ui.label(notice);
+            }
+        },
+    );
     card(
         ui,
         "Theme",

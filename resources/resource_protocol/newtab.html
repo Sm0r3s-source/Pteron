@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Tab</title>
+    <link rel="stylesheet" href="resource:///newtab.css" />
+    <style>{{THEME_STYLE}}</style>
+  </head>
+  <body>
+    <main>
+      <img class="logo" src="resource:///feather.png" alt="" />
+      <div class="clock" id="clock"></div>
+      <div class="greeting" id="greeting">Pteron</div>
+      <form action="{{FORM_ACTION}}" autocomplete="off">
+        {{HIDDEN_INPUTS}}
+        <input name="{{QUERY_NAME}}" placeholder="Search with {{ENGINE_NAME}} or type an address" autofocus />
+        <button type="submit" aria-label="Search">&rarr;</button>
+      </form>
+      <div class="shortcuts">{{SHORTCUTS}}</div>
+      <div class="hint">Pteron</div>
+    </main>
+    <script>
+      (function () {
+        function pad(n) { return n < 10 ? "0" + n : "" + n; }
+        function tick() {
+          var d = new Date();
+          var h = d.getHours();
+          document.getElementById("clock").textContent = pad(h) + ":" + pad(d.getMinutes());
+          var part = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+          var days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+          var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+          document.getElementById("greeting").textContent =
+            part + " · " + days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
+        }
+        try { tick(); setInterval(tick, 20000); } catch (e) {}
+      })();
+    </script>
+  </body>
+</html>
