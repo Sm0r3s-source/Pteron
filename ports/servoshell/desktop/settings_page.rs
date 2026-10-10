@@ -61,6 +61,10 @@ pub(crate) enum PageAction {
     ClearHistory,
     /// Close Pteron and let the downloaded update replace the files.
     InstallUpdate,
+    /// Save a problem report file on the Desktop, with this note from the user.
+    SaveReport(String),
+    /// Open the page listing known problems in a new tab.
+    OpenKnownIssues,
 }
 
 #[derive(Default)]
@@ -73,6 +77,8 @@ pub(crate) struct PageState {
     pub notice: Option<String>,
     /// Text typed in "Find in Settings".
     pub query: String,
+    /// Text typed in "Report a problem".
+    pub report_note: String,
 }
 
 /// Draw the settings page over `area` when it is open. Returns true if a setting changed.
@@ -199,7 +205,7 @@ pub(crate) fn show(
                                                     &mut changed,
                                                 ),
                                                 Category::About => {
-                                                    if about_section(ui, &mut page.pending) {
+                                                    if about_section(ui, &mut page.pending, &mut page.report_note, &page.notice) {
                                                         *settings = pteron::Settings::default();
                                                         changed = true;
                                                     }
@@ -670,7 +676,12 @@ fn updates_card(ui: &mut egui::Ui, pending: &mut Vec<PageAction>) {
     );
 }
 
-fn about_section(ui: &mut egui::Ui, pending: &mut Vec<PageAction>) -> bool {
+fn about_section(
+    ui: &mut egui::Ui,
+    pending: &mut Vec<PageAction>,
+    report_note: &mut String,
+    notice: &Option<String>,
+) -> bool {
     let mut reset = false;
     card(
         ui,
@@ -682,6 +693,35 @@ fn about_section(ui: &mut egui::Ui, pending: &mut Vec<PageAction>) -> bool {
         },
     );
     updates_card(ui, pending);
+    card(
+        ui,
+        "Report a problem",
+        Some("Saves a small file on your Desktop (versions, your computer, your settings and the newest log). Pteron sends nothing by itself: you send the file to whoever gave you Pteron."),
+        "report problem bug feedback issue help known",
+        |ui| {
+            ui.label("What went wrong? (optional)");
+            ui.add(
+                egui::TextEdit::multiline(report_note)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save report to Desktop").clicked() {
+                    pending.push(PageAction::SaveReport(report_note.clone()));
+                }
+                if ui.button("Known problems").clicked() {
+                    pending.push(PageAction::OpenKnownIssues);
+                }
+            });
+            if let Some(text) = notice &&
+                (text.starts_with("Saved:") || text.starts_with("Could not save"))
+            {
+                ui.add_space(6.0);
+                ui.label(RichText::new(text).small());
+            }
+        },
+    );
     card(
         ui,
         "Settings file",

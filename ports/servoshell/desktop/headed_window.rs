@@ -685,6 +685,12 @@ impl HeadedWindow {
                     self.modifiers_state.set(modifiers.state())
                 },
                 WindowEvent::MouseInput { state, button, .. } => {
+                    // Pteron: a click in the page means the window has focus. If the page
+                    // still thinks it does not, it paints no typing cursor, so say it again.
+                    if state == ElementState::Pressed && !webview.focused() {
+                        crate::crashlog::note("focus: page was clicked while marked unfocused; re-focusing it");
+                        webview.set_focused(true);
+                    }
                     self.handle_mouse_button_event(&webview, button, state);
                 },
                 WindowEvent::CursorMoved { position, .. } => {

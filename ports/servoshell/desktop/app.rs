@@ -106,6 +106,15 @@ impl App {
             self.initial_url = url;
         }
 
+        // Pteron: the very first launch opens the welcome page.
+        if plan.first.is_none() &&
+            self.servoshell_preferences.url.is_none() &&
+            crate::pteron::take_first_run() &&
+            let Ok(url) = ServoUrl::parse("servo:welcome")
+        {
+            self.initial_url = url;
+        }
+
         let url = self.initial_url.as_url().clone();
 
         let servo = servo_builder.build();

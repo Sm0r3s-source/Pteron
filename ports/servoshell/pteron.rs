@@ -52,6 +52,8 @@ pub(crate) struct Settings {
     pub fast_start: bool,
     /// Tiles on the new tab page: "off", "bookmarks" or "frequent" (bookmarks + most visited).
     pub newtab_tiles: String,
+    /// The welcome page has been shown once.
+    pub welcome_shown: bool,
 }
 
 impl Default for Settings {
@@ -69,6 +71,7 @@ impl Default for Settings {
             hw_video_decode: true,
             fast_start: true,
             newtab_tiles: "off".to_string(),
+            welcome_shown: false,
         }
     }
 }
@@ -128,6 +131,9 @@ fn load_from_disk() -> Settings {
             if let Some(enabled) = value.get("hw_video_decode").and_then(|v| v.as_bool()) {
                 settings.hw_video_decode = enabled;
             }
+            if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
+                settings.welcome_shown = shown;
+            }
             if let Some(tiles) = value.get("newtab_tiles").and_then(|v| v.as_str()) &&
                 matches!(tiles, "off" | "bookmarks" | "frequent")
             {
@@ -178,6 +184,7 @@ pub(crate) fn update(new_settings: Settings) {
         "hw_video_decode": new_settings.hw_video_decode,
         "fast_start": new_settings.fast_start,
         "newtab_tiles": new_settings.newtab_tiles,
+        "welcome_shown": new_settings.welcome_shown,
     });
     if let Err(error) = std::fs::write(&path, json.to_string()) {
         warn!("Could not save {}: {error}", path.display());
@@ -472,4 +479,61 @@ pub(crate) fn popup_notice() -> Option<u32> {
     let last = LAST_BLOCKED_MS.load(Ordering::Relaxed);
     (last != 0 && now_ms().saturating_sub(last) <= NOTICE_MS)
         .then(|| BLOCKED_COUNT.load(Ordering::Relaxed))
+}
+
+
+/// True once, the first time Pteron starts: the welcome page is shown and remembered as shown.
+pub(crate) fn take_first_run() -> bool {
+    let mut current = settings();
+    if current.welcome_shown {
+        return false;
+    }
+    current.welcome_shown = true;
+    update(current);
+    true
+}
+
+const PAGE_STYLE: &str = "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<style>:root{color-scheme:dark light}body{font:16px/1.55 system-ui,Segoe UI,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;background:#16181d;color:#e6e8ec}\
+@media (prefers-color-scheme:light){body{background:#fafafa;color:#1c1e22}.card{background:#fff;border-color:#dcdfe4}code{background:#eceef2}}\
+h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px}p{margin:8px 0}.sub{opacity:.7;margin-bottom:24px}\
+.card{background:#1f2229;border:1px solid #2c303a;border-radius:10px;padding:4px 18px 12px;margin:14px 0}\
+li{margin:6px 0}code{background:#2a2e38;padding:1px 6px;border-radius:5px}a{color:#6ea8ff}</style>";
+
+/// The page shown the first time Pteron opens.
+pub(crate) fn welcome_html() -> String {
+    format!(
+        "<!doctype html><title>Welcome to Pteron</title>{PAGE_STYLE}<h1>Welcome to Pteron</h1>\
+<p class=sub>A light browser built on the Servo engine. This is an early test version.</p>\
+<div class=card><h2>What to expect</h2><ul>\
+<li>It uses much less memory than the big browsers, and background tabs go to sleep by themselves.</li>\
+<li>YouTube opens in Pteron's own simple player.</li>\
+<li>It is young: some websites look wrong, load slowly or do not work. <a href=\"servo:known-issues\">See the list of known problems.</a></li></ul></div>\
+<div class=card><h2>Found a problem?</h2>\
+<p>Open the sidebar, then <b>Settings &rarr; About &rarr; Report a problem</b>. It saves a small file on your Desktop with the details. Send that file to whoever gave you Pteron.</p></div>\
+<div class=card><h2>Updates</h2><p>Pteron updates itself from <b>Settings &rarr; About</b>. Nothing is installed without your say-so.</p></div>"
+    )
+}
+
+/// The page listing what is known not to work yet.
+pub(crate) fn known_issues_html() -> String {
+    format!(
+        "<!doctype html><title>Known problems</title>{PAGE_STYLE}<h1>Known problems</h1>\
+<p class=sub>Pteron build {}. This list is what is already known, so you do not need to report these.</p>\
+<div class=card><h2>Websites</h2><ul>\
+<li>Sites that play protected (DRM) media do not work: Spotify, Netflix, Disney+ and similar.</li>\
+<li>Sites with strict anti-bot checks (such as a login behind a reCAPTCHA) may not let you in.</li>\
+<li>Some modern web pages look wrong, stay blank, or load slowly, because the engine does not support every web feature yet.</li>\
+<li>The text cursor may not show in some text boxes (being looked at).</li></ul></div>\
+<div class=card><h2>YouTube</h2><ul>\
+<li>Videos play up to 1080p60 in the H.264 format. VP9, AV1 and 4K are not supported.</li>\
+<li>Very long videos can take several seconds to become fully seekable, and YouTube may slow requests down.</li>\
+<li>1080p60 on a slow computer can look soft or stutter. Try 720p60.</li></ul></div>\
+<div class=card><h2>The browser</h2><ul>\
+<li>Windows only for now. No extensions, no ad blocker, no sync, no password manager.</li>\
+<li>The installer is not signed yet, so Windows shows a &quot;protected your PC&quot; warning. Choose <b>More info</b>, then <b>Run anyway</b>.</li>\
+<li>The memory savings have not been measured against other browsers yet.</li></ul></div>\
+<p>Something not on this list? <b>Settings &rarr; About &rarr; Report a problem</b>.</p>",
+        crate::updater::BUILD
+    )
 }

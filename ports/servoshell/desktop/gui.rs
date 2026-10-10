@@ -908,6 +908,23 @@ impl Gui {
                         },
                         Err(message) => message,
                     },
+                    settings_page::PageAction::SaveReport(note) => match crate::report::save(&note) {
+                        Ok(path) => {
+                            crate::report::show_in_folder(&path);
+                            settings_page.report_note.clear();
+                            format!(
+                                "Saved: {}. Send this file to whoever gave you Pteron.",
+                                path.display()
+                            )
+                        },
+                        Err(message) => message,
+                    },
+                    settings_page::PageAction::OpenKnownIssues => {
+                        if let Ok(url) = Url::parse("servo:known-issues") {
+                            window.queue_user_interface_command(UserInterfaceCommand::NewTabWithUrl(url));
+                        }
+                        String::new()
+                    },
                     settings_page::PageAction::ForgetSession => {
                         pteron::clear_session();
                         "Saved tabs forgotten (they are saved again from the tabs open now)."

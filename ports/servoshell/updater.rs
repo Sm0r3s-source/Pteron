@@ -12,7 +12,7 @@ use crate::streamproxy::{UPSTREAM_USER_AGENT, curl_command};
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 35;
+pub(crate) const BUILD: u32 = 36;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";

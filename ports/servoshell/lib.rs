@@ -26,6 +26,7 @@ mod pteron;
 mod innertube;
 mod mp4mux;
 mod streamproxy;
+mod report;
 mod updater;
 mod youtube;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
