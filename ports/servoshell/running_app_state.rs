@@ -824,6 +824,14 @@ impl WebViewDelegate for RunningAppState {
             }
             return;
         }
+        // Pteron: plain http sites get a warning page first (with a way to go on).
+        if crate::secure::needs_warning(&navigation_request.url) &&
+            let Some(page) = crate::secure::warning_url(&navigation_request.url)
+        {
+            navigation_request.deny();
+            webview.load(page);
+            return;
+        }
         // Pteron: links to files (zip, pdf, exe, ...) are downloaded instead of opened, and
         // only right after a click or key press.
         if crate::downloads::is_download_url(&navigation_request.url) {

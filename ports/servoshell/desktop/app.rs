@@ -98,6 +98,9 @@ impl App {
             .protocol_registry(protocol_registry)
             .event_loop_waker(self.waker.clone());
 
+        // Pteron: take in a newer copy of bookmarks and settings from the sync folder first.
+        crate::sync::startup();
+
         // Pteron: pinned tabs (and, if chosen, the whole last session) come back at launch.
         let plan = crate::pteron::startup_plan(self.servoshell_preferences.url.is_some());
         if let Some(first) = &plan.first &&

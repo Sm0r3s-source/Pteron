@@ -413,8 +413,12 @@ h2{font-size:15px;margin:6px 0 10px;color:var(--mut);font-weight:600}
 #ctl{display:flex;align-items:center;gap:4px}
 #ctl .ib{font-size:22px}
 #pp{width:42px;height:42px;border-radius:50%;border:0;background:var(--gold);color:#1b1608;font-size:18px}
-#seek{flex:1;min-width:80px;accent-color:var(--gold)}
-#vol{width:90px;accent-color:var(--gold)}
+#seek{flex:1;min-width:80px}
+#vol{width:90px}
+.sl{position:relative;height:20px;cursor:pointer;user-select:none}
+.sl:before{content:'';position:absolute;left:0;right:0;top:7px;height:6px;border-radius:3px;background:var(--bd)}
+.sl i{position:absolute;left:0;top:7px;height:6px;border-radius:3px;background:var(--gold);width:0}
+.sl b{position:absolute;top:3px;left:0;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--gold);box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .time{color:var(--mut);font-size:13px;min-width:90px;text-align:center}
 @media (max-width:700px){#now{width:120px}#vol,.time{display:none}}
 "#;
@@ -424,6 +428,21 @@ const JS: &str = r#"
 var U='@U@',A=document.getElementById('a'),Q={tracks:[],cur:null,repeat:0,vol:0.8},R={},gen=0,asked={},next=null,title='';
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 function $(i){return document.getElementById(i);}
+// Servo cannot drag a real range input yet, so the two sliders are drawn and handled here.
+function slider(e,max,step){
+  var v=0,m=max,f=e.firstChild,k=e.lastChild;
+  function draw(){var p=m>0?Math.min(1,Math.max(0,v/m)):0;f.style.width=(p*100)+'%';k.style.left=(p*100)+'%';}
+  Object.defineProperty(e,'value',{get:function(){return v;},set:function(x){v=Math.min(m,Math.max(0,parseFloat(x)||0));draw();}});
+  Object.defineProperty(e,'max',{get:function(){return m;},set:function(x){m=parseFloat(x)||0;if(v>m)v=m;draw();}});
+  function at(ev){var r=e.getBoundingClientRect();var p=r.width?(ev.clientX-r.left)/r.width:0;p=Math.min(1,Math.max(0,p));var x=p*m;if(step)x=Math.round(x/step)*step;return Math.min(m,x);}
+  function fire(n){e.dispatchEvent(new Event(n));}
+  var down=false;
+  function move(ev){if(!down)return;e.value=at(ev);fire('input');ev.preventDefault();}
+  function up(){if(!down)return;down=false;document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);fire('change');}
+  e.addEventListener('mousedown',function(ev){if(ev.button!==0||m<=0)return;down=true;e.value=at(ev);fire('input');document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);ev.preventDefault();});
+  draw();
+}
+slider(document.getElementById('seek'),0,1);slider(document.getElementById('vol'),1,0.02);
 function fmt(s){s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;if(m>=60){var h=Math.floor(m/60);m=m%60;return h+':'+(m<10?'0':'')+m+':'+(r<10?'0':'')+r;}return m+':'+(r<10?'0':'')+r;}
 function api(cmd,arg,cb){var x=new XMLHttpRequest();x.open('GET',U+'?x='+encodeURIComponent(arg===undefined||arg===null?cmd:cmd+':'+arg));
   x.onload=function(){var d=null;try{d=JSON.parse(x.responseText);}catch(e){}cb(d);};x.onerror=function(){cb(null);};x.send();}
@@ -565,8 +584,8 @@ pub(crate) fn page_html() -> String {
          <div id=\"ctl\"><button id=\"pv\" class=\"ib\" title=\"Previous\">\u{23EE}</button>\
          <button id=\"pp\" title=\"Play or pause\">\u{25B6}</button>\
          <button id=\"nx\" class=\"ib\" title=\"Next\">\u{23ED}</button></div>\
-         <input id=\"seek\" type=\"range\" min=\"0\" max=\"0\" step=\"1\" value=\"0\"><span id=\"tm\" class=\"time\">0:00 / 0:00</span>\
-         <input id=\"vol\" type=\"range\" min=\"0\" max=\"1\" step=\"0.02\" value=\"0.8\" title=\"Volume\"></div>\
+         <div id=\"seek\" class=\"sl\"><i></i><b></b></div><span id=\"tm\" class=\"time\">0:00 / 0:00</span>\
+         <div id=\"vol\" class=\"sl\" title=\"Volume\"><i></i><b></b></div></div>\
          <audio id=\"a\" preload=\"auto\"></audio><script>{js}</script></body></html>"
     )
 }

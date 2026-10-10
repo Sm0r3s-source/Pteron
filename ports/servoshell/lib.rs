@@ -30,7 +30,10 @@ mod mp4mux;
 mod streamproxy;
 mod find;
 mod music;
+mod reader;
 mod report;
+mod secure;
+mod sync;
 mod updater;
 mod youtube;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]

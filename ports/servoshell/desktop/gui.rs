@@ -607,6 +607,22 @@ impl Gui {
                             .queue_user_interface_command(UserInterfaceCommand::CloseSleepingTab(
                                 index,
                             )),
+                        sidebar::Action::ReaderMode => {
+                            if let Some(webview) = window.active_webview() {
+                                webview.evaluate_javascript(
+                                    crate::reader::script(&pteron::settings()),
+                                    |value| {
+                                        if let Ok(servo::JSValue::String(text)) = value {
+                                            if text == "none" {
+                                                crate::reader::set_message(
+                                                    "Reading mode: no article found on this page.",
+                                                );
+                                            }
+                                        }
+                                    },
+                                );
+                            }
+                        },
                         sidebar::Action::ToggleBookmark => {
                             if let Some((url, title)) = &current_page {
                                 library::toggle_bookmark(url, title);
@@ -887,6 +903,23 @@ impl Gui {
                 apply_theme(ctx, settings);
                 pteron::update(settings.clone());
             }
+            if let Some(result) = crate::sync::take_chosen() {
+                settings_page.notice = Some(match result {
+                    Ok(folder) => {
+                        settings.sync_folder = folder;
+                        pteron::update(settings.clone());
+                        let message = match crate::sync::join() {
+                            Ok(message) => message,
+                            Err(message) => message,
+                        };
+                        // Settings may have come from the other computer.
+                        *settings = pteron::settings();
+                        apply_theme(ctx, settings);
+                        message
+                    },
+                    Err(message) => message,
+                });
+            }
             if let Some(result) = crate::appearance::take_picked() {
                 settings_page.notice = Some(match result {
                     Ok(()) => {
@@ -946,6 +979,24 @@ impl Gui {
                         Ok(1) => "Imported 1 bookmark.".to_string(),
                         Ok(count) => format!("Imported {count} bookmarks."),
                         Err(message) => message,
+                    },
+                    settings_page::PageAction::ChooseSyncFolder => {
+                        crate::sync::choose_folder_async();
+                        "Choose a folder in the window that opens.".to_string()
+                    },
+                    settings_page::PageAction::SyncNow => {
+                        let message = match crate::sync::sync_now(true) {
+                            Ok(message) => message,
+                            Err(message) => message,
+                        };
+                        *settings = pteron::settings();
+                        apply_theme(ctx, settings);
+                        message
+                    },
+                    settings_page::PageAction::StopSync => {
+                        settings.sync_folder.clear();
+                        pteron::update(settings.clone());
+                        "Sync is off. The file in the folder was left where it is.".to_string()
                     },
                     settings_page::PageAction::OpenDownloadPage => {
                         if let Ok(url) = Url::parse(&format!("https://github.com/{}/releases/latest", crate::updater::REPO)) {
@@ -1024,6 +1075,19 @@ impl Gui {
 
             // Pteron: find in page (Ctrl+F).
             Self::show_find_bar(ctx, window);
+
+            // Pteron: short messages from reading mode.
+            if let Some(text) = crate::reader::message() {
+                egui::Area::new(Id::new("reader_notice"))
+                    .order(Order::Tooltip)
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -116.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(text);
+                        });
+                    });
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
 
             // Pteron: tell the user when a pop-up was blocked.
             if let Some(count) = pteron::popup_notice() {

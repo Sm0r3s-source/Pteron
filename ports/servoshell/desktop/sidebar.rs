@@ -88,6 +88,8 @@ pub(crate) enum Action {
     TogglePin(usize),
     TogglePinSleeping(usize),
     ToggleBookmark,
+    /// Show the page in reading mode.
+    ReaderMode,
     OpenBookmark(usize),
     OpenBookmarkInNewTab(usize),
     RemoveBookmark(usize),
@@ -410,6 +412,13 @@ fn framed(
                             .clicked()
                         {
                             actions.push(Action::ToggleBookmark);
+                        }
+                        if ui
+                            .add_enabled(model.can_bookmark, icon_button("Aa"))
+                            .on_hover_text("Reading mode: clean text and pictures only")
+                            .clicked()
+                        {
+                            actions.push(Action::ReaderMode);
                         }
                     });
                     ui.add_space(4.0);

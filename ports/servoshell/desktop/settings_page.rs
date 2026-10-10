@@ -73,6 +73,12 @@ pub(crate) enum PageAction {
     ChoosePicture,
     /// Open the releases page in a new tab (the manual way to update).
     OpenDownloadPage,
+    /// Open the folder chooser for syncing.
+    ChooseSyncFolder,
+    /// Compare with the sync folder right now.
+    SyncNow,
+    /// Stop syncing (the file in the folder is left alone).
+    StopSync,
 }
 
 #[derive(Default)]
@@ -770,6 +776,57 @@ fn privacy_section(
             if ui.button("Clear browsing history").clicked() {
                 pending.push(PageAction::ClearHistory);
             }
+        },
+    );
+    card(
+        ui,
+        "Sync between computers",
+        Some(
+            "Keeps your bookmarks and settings the same on two computers through a folder that \
+             both have, such as one inside OneDrive, Google Drive or Dropbox. Pteron only writes \
+             one small file there. History, passwords and cookies are never synced.",
+        ),
+        "sync synchronize devices computers phone laptop bookmarks settings onedrive drive dropbox backup",
+        |ui| {
+            if settings.sync_folder.trim().is_empty() {
+                if crate::sync::choosing() {
+                    ui.label("Choosing...");
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                } else if ui.button("Choose sync folder").clicked() {
+                    pending.push(PageAction::ChooseSyncFolder);
+                }
+            } else {
+                ui.label(RichText::new(format!("Folder: {}", settings.sync_folder)).weak());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Sync now").clicked() {
+                        pending.push(PageAction::SyncNow);
+                    }
+                    if ui.button("Change folder").clicked() {
+                        pending.push(PageAction::ChooseSyncFolder);
+                    }
+                    if ui.button("Stop syncing").clicked() {
+                        pending.push(PageAction::StopSync);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Changes are saved to the folder as you make them. Another computer's changes are picked up when Pteron starts, or when you press Sync now.")
+                        .small()
+                        .weak(),
+                );
+            }
+        },
+    );
+    card(
+        ui,
+        "Secure connections",
+        Some("Sites that use plain http can be read and changed by others on the same network."),
+        "https http secure security warning connection",
+        |ui| {
+            *changed |= ui
+                .checkbox(&mut settings.https_warning, "Warn me before opening http sites")
+                .changed();
         },
     );
     card(

@@ -56,6 +56,10 @@ pub(crate) struct Settings {
     pub newtab_tiles: String,
     /// The welcome page has been shown once.
     pub welcome_shown: bool,
+    /// Folder where bookmarks and settings are kept in step with other computers ("" = off).
+    pub sync_folder: String,
+    /// Warn before opening a page over plain http.
+    pub https_warning: bool,
     /// Block known ad and tracker networks.
     pub adblock: bool,
     /// Colour theme: an id from `appearance::PRESETS` or "custom".
@@ -85,6 +89,8 @@ impl Default for Settings {
             fast_start: true,
             newtab_tiles: "off".to_string(),
             welcome_shown: false,
+            sync_folder: String::new(),
+            https_warning: true,
             adblock: true,
             accent: "auto".to_string(),
             accent_custom: "#d6aa48".to_string(),
@@ -104,6 +110,88 @@ fn settings_path() -> Option<PathBuf> {
     None
 }
 
+/// Reads every setting found in `value` into `settings`; anything missing or invalid is
+/// left as it was.
+pub(crate) fn apply_json(settings: &mut Settings, value: &serde_json::Value) {
+    if let Some(engine) = value.get("engine").and_then(|v| v.as_str()) {
+        settings.engine = engine.to_string();
+    }
+    if let Some(url) = value.get("searxng_url").and_then(|v| v.as_str()) {
+        settings.searxng_url = url.to_string();
+    }
+    if let Some(theme) = value.get("theme").and_then(|v| v.as_str()) &&
+        (matches!(theme, "system" | "light" | "dark" | "custom") ||
+            crate::appearance::THEMES.iter().any(|(id, ..)| *id == theme))
+    {
+        settings.theme = theme.to_string();
+    }
+    if let Some(color) = value.get("custom_bg").and_then(|v| v.as_str()) &&
+        crate::appearance::parse_hex(color).is_some()
+    {
+        settings.custom_bg = color.to_string();
+    }
+    if let Some(minutes) = value.get("tab_sleep_minutes").and_then(|v| v.as_u64()) {
+        settings.tab_sleep_minutes = minutes.min(24 * 60) as u32;
+    }
+    if let Some(pinned) = value.get("sidebar_pinned").and_then(|v| v.as_bool()) {
+        settings.sidebar_pinned = pinned;
+    }
+    if let Some(startup) = value.get("startup").and_then(|v| v.as_str()) &&
+        matches!(startup, "newtab" | "restore" | "custom")
+    {
+        settings.startup = startup.to_string();
+    }
+    if let Some(url) = value.get("homepage_url").and_then(|v| v.as_str()) {
+        settings.homepage_url = url.to_string();
+    }
+    if let Some(enabled) = value.get("history_enabled").and_then(|v| v.as_bool()) {
+        settings.history_enabled = enabled;
+    }
+    if let Some(enabled) = value.get("youtube_player").and_then(|v| v.as_bool()) {
+        settings.youtube_player = enabled;
+    }
+    if let Some(enabled) = value.get("fast_start").and_then(|v| v.as_bool()) {
+        settings.fast_start = enabled;
+    }
+    if let Some(enabled) = value.get("hw_video_decode").and_then(|v| v.as_bool()) {
+        settings.hw_video_decode = enabled;
+    }
+    if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
+        settings.welcome_shown = shown;
+    }
+    if let Some(enabled) = value.get("https_warning").and_then(|v| v.as_bool()) {
+        settings.https_warning = enabled;
+    }
+    if let Some(enabled) = value.get("adblock").and_then(|v| v.as_bool()) {
+        settings.adblock = enabled;
+    }
+    if let Some(accent) = value.get("accent").and_then(|v| v.as_str()) &&
+        (accent == "custom" || accent == "auto" || crate::appearance::PRESETS.iter().any(|(id, ..)| *id == accent))
+    {
+        settings.accent = accent.to_string();
+    }
+    if let Some(color) = value.get("accent_custom").and_then(|v| v.as_str()) &&
+        crate::appearance::parse_hex(color).is_some()
+    {
+        settings.accent_custom = color.to_string();
+    }
+    if let Some(bg) = value.get("newtab_bg").and_then(|v| v.as_str()) &&
+        matches!(bg, "theme" | "gradient" | "color" | "picture")
+    {
+        settings.newtab_bg = bg.to_string();
+    }
+    if let Some(color) = value.get("newtab_color").and_then(|v| v.as_str()) &&
+        crate::appearance::parse_hex(color).is_some()
+    {
+        settings.newtab_color = color.to_string();
+    }
+    if let Some(tiles) = value.get("newtab_tiles").and_then(|v| v.as_str()) &&
+        matches!(tiles, "off" | "bookmarks" | "frequent")
+    {
+        settings.newtab_tiles = tiles.to_string();
+    }
+}
+
 fn load_from_disk() -> Settings {
     let mut settings = Settings::default();
     let Some(path) = settings_path() else {
@@ -114,79 +202,9 @@ fn load_from_disk() -> Settings {
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(value) => {
-            if let Some(engine) = value.get("engine").and_then(|v| v.as_str()) {
-                settings.engine = engine.to_string();
-            }
-            if let Some(url) = value.get("searxng_url").and_then(|v| v.as_str()) {
-                settings.searxng_url = url.to_string();
-            }
-            if let Some(theme) = value.get("theme").and_then(|v| v.as_str()) &&
-                (matches!(theme, "system" | "light" | "dark" | "custom") ||
-                    crate::appearance::THEMES.iter().any(|(id, ..)| *id == theme))
-            {
-                settings.theme = theme.to_string();
-            }
-            if let Some(color) = value.get("custom_bg").and_then(|v| v.as_str()) &&
-                crate::appearance::parse_hex(color).is_some()
-            {
-                settings.custom_bg = color.to_string();
-            }
-            if let Some(minutes) = value.get("tab_sleep_minutes").and_then(|v| v.as_u64()) {
-                settings.tab_sleep_minutes = minutes.min(24 * 60) as u32;
-            }
-            if let Some(pinned) = value.get("sidebar_pinned").and_then(|v| v.as_bool()) {
-                settings.sidebar_pinned = pinned;
-            }
-            if let Some(startup) = value.get("startup").and_then(|v| v.as_str()) &&
-                matches!(startup, "newtab" | "restore" | "custom")
-            {
-                settings.startup = startup.to_string();
-            }
-            if let Some(url) = value.get("homepage_url").and_then(|v| v.as_str()) {
-                settings.homepage_url = url.to_string();
-            }
-            if let Some(enabled) = value.get("history_enabled").and_then(|v| v.as_bool()) {
-                settings.history_enabled = enabled;
-            }
-            if let Some(enabled) = value.get("youtube_player").and_then(|v| v.as_bool()) {
-                settings.youtube_player = enabled;
-            }
-            if let Some(enabled) = value.get("fast_start").and_then(|v| v.as_bool()) {
-                settings.fast_start = enabled;
-            }
-            if let Some(enabled) = value.get("hw_video_decode").and_then(|v| v.as_bool()) {
-                settings.hw_video_decode = enabled;
-            }
-            if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
-                settings.welcome_shown = shown;
-            }
-            if let Some(enabled) = value.get("adblock").and_then(|v| v.as_bool()) {
-                settings.adblock = enabled;
-            }
-            if let Some(accent) = value.get("accent").and_then(|v| v.as_str()) &&
-                (accent == "custom" || accent == "auto" || crate::appearance::PRESETS.iter().any(|(id, ..)| *id == accent))
-            {
-                settings.accent = accent.to_string();
-            }
-            if let Some(color) = value.get("accent_custom").and_then(|v| v.as_str()) &&
-                crate::appearance::parse_hex(color).is_some()
-            {
-                settings.accent_custom = color.to_string();
-            }
-            if let Some(bg) = value.get("newtab_bg").and_then(|v| v.as_str()) &&
-                matches!(bg, "theme" | "gradient" | "color" | "picture")
-            {
-                settings.newtab_bg = bg.to_string();
-            }
-            if let Some(color) = value.get("newtab_color").and_then(|v| v.as_str()) &&
-                crate::appearance::parse_hex(color).is_some()
-            {
-                settings.newtab_color = color.to_string();
-            }
-            if let Some(tiles) = value.get("newtab_tiles").and_then(|v| v.as_str()) &&
-                matches!(tiles, "off" | "bookmarks" | "frequent")
-            {
-                settings.newtab_tiles = tiles.to_string();
+            apply_json(&mut settings, &value);
+            if let Some(folder) = value.get("sync_folder").and_then(|v| v.as_str()) {
+                settings.sync_folder = folder.to_string();
             }
         },
         Err(error) => warn!("Could not read {}: {error}", path.display()),
@@ -216,6 +234,7 @@ pub(crate) fn tab_sleep_minutes() -> u32 {
 /// Replace the settings and save them to disk.
 pub(crate) fn update(new_settings: Settings) {
     crate::adblock::set_enabled(new_settings.adblock);
+    crate::sync::changed_soon();
     if let Ok(mut current) = store().write() {
         *current = new_settings.clone();
     }
@@ -240,6 +259,8 @@ pub(crate) fn update(new_settings: Settings) {
         "fast_start": new_settings.fast_start,
         "newtab_tiles": new_settings.newtab_tiles,
         "welcome_shown": new_settings.welcome_shown,
+        "sync_folder": new_settings.sync_folder,
+        "https_warning": new_settings.https_warning,
         "adblock": new_settings.adblock,
         "accent": new_settings.accent,
         "accent_custom": new_settings.accent_custom,
@@ -554,12 +575,13 @@ pub(crate) fn take_first_run() -> bool {
     true
 }
 
+pub(crate) const PAGE_STYLE_PUBLIC: &str = PAGE_STYLE;
 const PAGE_STYLE: &str = "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <style>:root{color-scheme:dark light}body{font:16px/1.55 system-ui,Segoe UI,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;background:#16181d;color:#e6e8ec}\
 @media (prefers-color-scheme:light){body{background:#fafafa;color:#1c1e22}.card{background:#fff;border-color:#dcdfe4}code{background:#eceef2}}\
 h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px}p{margin:8px 0}.sub{opacity:.7;margin-bottom:24px}\
 .card{background:#1f2229;border:1px solid #2c303a;border-radius:10px;padding:4px 18px 12px;margin:14px 0}\
-li{margin:6px 0}code{background:#2a2e38;padding:1px 6px;border-radius:5px}a{color:#6ea8ff}</style>";
+li{margin:6px 0}code{background:#2a2e38;padding:1px 6px;border-radius:5px}a{color:#6ea8ff}.btn{display:inline-block;background:#6ea8ff;color:#10131a;padding:9px 16px;border-radius:8px;text-decoration:none;font-weight:600}</style>";
 
 /// The page shown the first time Pteron opens.
 pub(crate) fn welcome_html() -> String {
@@ -586,6 +608,10 @@ pub(crate) fn known_issues_html() -> String {
 <li>Sites with strict anti-bot checks (such as a login behind a reCAPTCHA) may not let you in.</li>\
 <li>Some modern web pages look wrong, stay blank, or load slowly, because the engine does not support every web feature yet.</li>\
 <li>The text cursor may not show in some text boxes (being looked at).</li></ul></div>\
+<div class=card><h2>Reading mode, sync and security</h2><ul>\
+<li>Reading mode (the <b>Aa</b> button) works on articles; on other pages it says it found nothing.</li>\
+<li>Sync works through a folder you choose and covers bookmarks and settings only. If both computers change the same thing before they sync, the newer change wins.</li>\
+<li>The http warning appears for sites without https. Some old sites have no https version.</li></ul></div>\
 <div class=card><h2>YouTube</h2><ul>\
 <li>Videos play up to 1080p60 in the H.264 format. VP9, AV1 and 4K are not supported.</li>\
 <li>Very long videos can take several seconds to become fully seekable, and YouTube may slow requests down.</li>\

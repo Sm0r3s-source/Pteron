@@ -306,8 +306,9 @@ pub(crate) fn choose_picture_async() {
     });
 }
 
-/// `Ok(None)` when the user closed the dialog without choosing.
-fn choose_picture() -> Result<Option<()>, String> {
+/// Runs a small PowerShell script that shows a Windows chooser and writes the chosen path into
+/// the file named by its `-Out` parameter. `Ok(None)` when the user closed it without choosing.
+pub(crate) fn run_chooser_script(script_text: &str) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -316,7 +317,7 @@ fn choose_picture() -> Result<Option<()>, String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let script = dir.join("pick.ps1");
         let out = dir.join("picked.txt");
-        std::fs::write(&script, PICK_SCRIPT).map_err(|e| e.to_string())?;
+        std::fs::write(&script, script_text).map_err(|e| e.to_string())?;
         let mut last = String::new();
         let mut started = false;
         for attempt in 0..3 {
@@ -342,20 +343,27 @@ fn choose_picture() -> Result<Option<()>, String> {
             }
         }
         if !started {
-            return Err(format!("Could not open the file chooser: {last}"));
+            return Err(format!("Could not open the chooser: {last}"));
         }
         let Ok(text) = std::fs::read_to_string(&out) else { return Ok(None) };
-        let chosen = text.trim_start_matches('\u{feff}').trim();
-        if chosen.is_empty() {
-            return Ok(None);
-        }
-        save_picture(std::path::Path::new(chosen))?;
-        Ok(Some(()))
+        let chosen = text.trim_start_matches('\u{feff}').trim().to_string();
+        Ok((!chosen.is_empty()).then_some(chosen))
     }
     #[cfg(not(windows))]
     {
-        let _ = PICK_SCRIPT;
-        Err("Choosing a picture is only built in for Windows.".into())
+        let _ = script_text;
+        Err("Choosing is only built in for Windows.".into())
+    }
+}
+
+/// `Ok(None)` when the user closed the dialog without choosing.
+fn choose_picture() -> Result<Option<()>, String> {
+    match run_chooser_script(PICK_SCRIPT)? {
+        Some(chosen) => {
+            save_picture(std::path::Path::new(&chosen))?;
+            Ok(Some(()))
+        },
+        None => Ok(None),
     }
 }
 

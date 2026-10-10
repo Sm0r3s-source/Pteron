@@ -56,6 +56,8 @@ impl ProtocolHandler for ServoProtocolHandler {
             "newtab" => html_response(request, crate::pteron::newtab_html()),
             "welcome" => html_response(request, crate::pteron::welcome_html()),
             "known-issues" => html_response(request, crate::pteron::known_issues_html()),
+            "http-warning" => html_response(request, crate::secure::warning_html(url.as_url())),
+            "http-continue" => html_response(request, crate::secure::continue_html(url.as_url())),
 
             "preferences" => ResourceProtocolHandler::response_for_path(
                 request,

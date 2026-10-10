@@ -178,6 +178,7 @@ fn save_history(data: &mut Data) {
 }
 
 fn save_bookmarks(data: &Data) {
+    crate::sync::changed_soon();
     let items: Vec<serde_json::Value> = data
         .bookmarks
         .iter()
@@ -370,6 +371,14 @@ pub(crate) fn parse_bookmarks_html(text: &str) -> Vec<Bookmark> {
         found.push(Bookmark { url, title });
     }
     found
+}
+
+/// Replaces all bookmarks (used when another computer's list is newer).
+pub(crate) fn replace_bookmarks(list: Vec<Bookmark>) {
+    with(|data| {
+        data.bookmarks = list;
+        save_bookmarks(data);
+    });
 }
 
 /// Adds the bookmarks that are not saved yet. Returns how many were new.
