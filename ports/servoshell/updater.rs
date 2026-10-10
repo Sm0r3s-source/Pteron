@@ -12,7 +12,7 @@ use crate::streamproxy::UPSTREAM_USER_AGENT;
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 41;
+pub(crate) const BUILD: u32 = 42;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";
@@ -275,6 +275,21 @@ pub(crate) fn check_once() {
     }
 }
 
+/// Arguments for the download. Every option must come before the `--`: after it curl takes
+/// everything as an address.
+fn download_args(zip: &Path, errfile: &Path, url: &str) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "1800", "-A", UPSTREAM_USER_AGENT, "-o"]
+        .iter()
+        .map(|a| (*a).into())
+        .collect();
+    args.push(zip.into());
+    args.push("--stderr".into());
+    args.push(errfile.into());
+    args.push("--".into());
+    args.push(url.into());
+    args
+}
+
 fn update_dir() -> PathBuf {
     std::env::temp_dir().join("pteron_update")
 }
@@ -379,12 +394,7 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     let errfile = dir.join("download.err");
     let mut child = with_curl(|mut command| {
         command
-            .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "1800", "-A", UPSTREAM_USER_AGENT, "-o"])
-            .arg(&zip)
-            .arg("--")
-            .arg(&release.url)
-            .arg("--stderr")
-            .arg(&errfile)
+            .args(download_args(&zip, &errfile, &release.url))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -573,6 +583,15 @@ mod tests {
         let certutil = format!("SHA256 hash of file x.zip:\r\n{}\r\nCertUtil: -hashfile command completed successfully.", "0f".repeat(32));
         assert_eq!(parse_sha256(&certutil), Some("0f".repeat(32)));
         assert_eq!(parse_sha256("nothing"), None);
+    }
+
+    #[test]
+    fn download_options_come_before_the_separator() {
+        let args = download_args(Path::new("a.zip"), Path::new("e.txt"), "https://x/y.zip");
+        let separator = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(separator, args.len() - 2);
+        assert_eq!(args.last().unwrap(), "https://x/y.zip");
+        assert!(args[..separator].iter().any(|a| a == "--stderr"));
     }
 
     #[test]
