@@ -628,3 +628,22 @@ pub(crate) fn known_issues_html() -> String {
         crate::updater::BUILD
     )
 }
+
+/// Servo mis-lays-out two small widgets in Google results (the "About this
+/// result" dots and the translate link) on top of the titles. Hide them.
+pub(crate) const GOOGLE_FIX_SCRIPT: &str = r#"(function(){try{
+var h=location.hostname;
+if(!/(^|\.)google\.[a-z.]+$/.test(h))return;
+var s=document.createElement('style');
+s.textContent='#rso [role="button"][aria-haspopup],#rso a[href*="translate.google."],#rso a[href*="/search?q=related"]{display:none!important}';
+(document.head||document.documentElement).appendChild(s);
+}catch(e){}})();"#;
+
+#[cfg(test)]
+mod google_fix_tests {
+    #[test]
+    fn script_is_scoped_to_google() {
+        assert!(super::GOOGLE_FIX_SCRIPT.contains("google\\.[a-z.]+$"));
+        assert!(super::GOOGLE_FIX_SCRIPT.contains("aria-haspopup"));
+    }
+}

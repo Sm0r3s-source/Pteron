@@ -921,6 +921,10 @@ fn updates_card(ui: &mut egui::Ui, pending: &mut Vec<PageAction>) {
                 ui.label(RichText::new(format!("The last update did not finish: {error}")).color(Color32::from_rgb(214, 120, 90)));
                 ui.add_space(6.0);
             }
+            if let Some(error) = updater::install_error() {
+                ui.label(RichText::new(error).color(Color32::from_rgb(214, 120, 90)));
+                ui.add_space(6.0);
+            }
             match status {
                 updater::Status::Idle | updater::Status::Checking => {
                     ui.label("Looking for updates...");

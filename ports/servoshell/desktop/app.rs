@@ -139,6 +139,11 @@ impl App {
             user_content_manager.add_script(Rc::new(script));
         }
 
+        user_content_manager.add_script(Rc::new(UserScript::new(
+            crate::pteron::GOOGLE_FIX_SCRIPT.to_string(),
+            None,
+        )));
+
         for user_stylesheet in &self.servoshell_preferences.user_stylesheets {
             user_content_manager.add_stylesheet(user_stylesheet.clone());
         }

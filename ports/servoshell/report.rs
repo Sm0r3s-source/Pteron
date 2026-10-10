@@ -96,7 +96,15 @@ fn file_name(now_secs: i64) -> String {
 pub(crate) fn save(note: &str) -> Result<PathBuf, String> {
     let now = std::time::SystemTime::now();
     let secs = crate::crashlog::unix_secs(now);
-    let (log_name, log_tail) = newest_crash_log().unwrap_or_else(|| ("none".to_string(), String::new()));
+    let (log_name, mut log_tail) = newest_crash_log().unwrap_or_else(|| ("none".to_string(), String::new()));
+    // The update helper's own log, if there is one (it helps when an update did not go through).
+    if let Some(text) = ::dirs::config_dir()
+        .map(|d| d.join(crate::pteron::APP_NAME).join("update.log"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        log_tail.push_str("\n\nUpdate log (update.log), last lines:\n");
+        log_tail.push_str(&tail_lines(&text, 40));
+    }
     let settings = std::fs::read_to_string(crate::pteron::settings_file_path()).unwrap_or_default();
     let text = compose(
         crate::updater::BUILD,

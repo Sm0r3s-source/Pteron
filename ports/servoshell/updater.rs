@@ -12,7 +12,7 @@ use crate::streamproxy::UPSTREAM_USER_AGENT;
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 44;
+pub(crate) const BUILD: u32 = 45;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";
@@ -465,8 +465,130 @@ try {
 Start-Process -FilePath $Exe
 "#;
 
+/// The same job for machines where PowerShell cannot be started: `tar` (part of Windows 10 and
+/// later) unpacks the zip, `robocopy` copies it over.
+const APPLY_CMD: &str = r#"@echo off
+setlocal
+set "DATA=%APPDATA%\Pteron"
+if not exist "%DATA%" mkdir "%DATA%"
+set "LOG=%DATA%\update.log"
+echo %date% %time% cmd helper started, waiting for Pteron (%1) to close>>"%LOG%"
+:wait
+tasklist /FI "PID eq %1" 2>nul | find "%1" >nul
+if not errorlevel 1 (
+  ping -n 2 127.0.0.1 >nul
+  goto wait
+)
+set "STAGE=%TEMP%\pteron_update_stage"
+if exist "%STAGE%" rmdir /s /q "%STAGE%"
+mkdir "%STAGE%"
+tar -xf "%~2" -C "%STAGE%"
+if errorlevel 1 (
+  echo cmd helper: unpacking failed>>"%LOG%"
+  echo Could not unpack the update file.>"%DATA%\update-error.txt"
+  goto restart
+)
+if not exist "%STAGE%\Pteron.exe" (
+  echo cmd helper: no Pteron.exe in the update>>"%LOG%"
+  echo The update file does not contain Pteron.exe.>"%DATA%\update-error.txt"
+  goto restart
+)
+robocopy "%STAGE%" "%~3" /E /R:15 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 (
+  echo cmd helper: copying failed>>"%LOG%"
+  echo Copying the new files failed.>"%DATA%\update-error.txt"
+  goto restart
+)
+rmdir /s /q "%STAGE%" 2>nul
+del "%~2" 2>nul
+del "%DATA%\update-error.txt" 2>nul
+echo cmd helper: update done>>"%LOG%"
+:restart
+start "" "%~4"
+"#;
+
+static INSTALL_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the last "Restart and update" did not go through (shown on the Updates card).
+pub(crate) fn install_error() -> Option<String> {
+    INSTALL_ERROR.lock().ok().and_then(|g| g.clone())
+}
+
+fn set_install_error(message: Option<String>) {
+    if let Ok(mut g) = INSTALL_ERROR.lock() {
+        *g = message;
+    }
+}
+
+/// One line in `%APPDATA%\Pteron\update.log` (the helper writes to the same file).
+fn log_line(text: &str) {
+    let Some(dir) = ::dirs::config_dir().map(|d| d.join(crate::pteron::APP_NAME)) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("update.log")) {
+        use std::io::Write;
+        let _ = writeln!(file, "{} pteron: {text}", crate::crashlog::timestamp(crate::crashlog::unix_secs(std::time::SystemTime::now())));
+    }
+}
+
+/// The ways to start the helper, in the order they are tried.
+#[cfg(windows)]
+fn helper_commands(script: &Path, cmd_script: &Path, zip: &Path, dir: &Path, exe: &Path) -> Vec<(String, std::process::Command)> {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED: u32 = 0x0000_0008;
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    let pid = std::process::id().to_string();
+    let mut list = Vec::new();
+    let powershell = |program: String, flags: u32| {
+        let mut command = std::process::Command::new(program);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+            .arg(script)
+            .args(["-ProcId", &pid, "-Zip"])
+            .arg(zip)
+            .arg("-Dir")
+            .arg(dir)
+            .arg("-Exe")
+            .arg(exe)
+            .creation_flags(flags);
+        command
+    };
+    let full = format!("{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    list.push(("PowerShell".to_string(), powershell("powershell.exe".to_string(), NO_WINDOW)));
+    list.push(("PowerShell (detached)".to_string(), powershell("powershell.exe".to_string(), NO_WINDOW | DETACHED)));
+    list.push(("PowerShell (full path)".to_string(), powershell(full, NO_WINDOW)));
+    let mut cmd = std::process::Command::new(format!("{root}\\System32\\cmd.exe"));
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .raw_arg(format!(
+            "/C \"\"{}\" {} \"{}\" \"{}\" \"{}\"\"",
+            cmd_script.display(),
+            pid,
+            zip.display(),
+            dir.display(),
+            exe.display()
+        ))
+        .creation_flags(NO_WINDOW);
+    list.push(("cmd".to_string(), cmd));
+    list
+}
+
 /// Starts the helper that finishes the update. The caller then closes the window.
 pub(crate) fn launch_installer() -> Result<(), String> {
+    set_install_error(None);
+    let result = launch_installer_inner();
+    if let Err(message) = &result {
+        log_line(&format!("could not start the update: {message}"));
+        set_install_error(Some(message.clone()));
+    }
+    result
+}
+
+fn launch_installer_inner() -> Result<(), String> {
     let Status::Ready(zip) = status() else {
         return Err("There is no downloaded update.".into());
     };
@@ -476,40 +598,43 @@ pub(crate) fn launch_installer() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("Could not find the program folder.")?.to_path_buf();
     let script = update_dir().join("apply.ps1");
+    let cmd_script = update_dir().join("apply.cmd");
     std::fs::write(&script, APPLY_SCRIPT).map_err(|e| format!("Could not prepare the update: {e}"))?;
+    std::fs::write(&cmd_script, APPLY_CMD.replace('\n', "\r\n")).map_err(|e| format!("Could not prepare the update: {e}"))?;
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let mut last = String::new();
-        for attempt in 0..4 {
-            let mut command = std::process::Command::new(if attempt < 2 { "powershell.exe".to_string() } else {
-                format!("{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
-            });
-            command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
-            .arg(&script)
-            .args(["-ProcId", &std::process::id().to_string(), "-Zip"])
-            .arg(&zip)
-            .arg("-Dir")
-            .arg(&dir)
-            .arg("-Exe")
-            .arg(&exe)
-            // DETACHED_PROCESS | CREATE_NO_WINDOW: keeps running after Pteron closes.
-            .creation_flags(0x0000_0008 | 0x0800_0000);
+        log_line(&format!("starting the update helper for {}", zip.display()));
+        let mut problems: Vec<String> = Vec::new();
+        for (name, mut command) in helper_commands(&script, &cmd_script, &zip, &dir, &exe) {
             match command.spawn() {
-                Ok(_) => return Ok(()),
-                Err(e) => last = e.to_string(),
+                Ok(mut child) => {
+                    // The helper waits for Pteron to close, so it must still be running a moment later.
+                    std::thread::sleep(Duration::from_millis(900));
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let line = format!("{name} stopped at once ({status})");
+                            log_line(&line);
+                            problems.push(line);
+                        },
+                        _ => {
+                            log_line(&format!("{name} started"));
+                            return Ok(());
+                        },
+                    }
+                },
+                Err(e) => {
+                    let line = format!("{name} could not start ({e})");
+                    log_line(&line);
+                    problems.push(line);
+                    std::thread::sleep(Duration::from_millis(300));
+                },
             }
-            std::thread::sleep(Duration::from_millis(400));
         }
-        Err(format!("Could not start the update: {last}"))
+        Err(format!("Could not start the update. {}", problems.join("; ")))
     }
     #[cfg(not(windows))]
     {
-        let _ = (dir, exe, script);
+        let _ = (dir, exe, script, cmd_script);
         Err("Updates are only built in for Windows.".into())
     }
 }
