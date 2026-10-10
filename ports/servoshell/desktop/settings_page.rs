@@ -71,6 +71,8 @@ pub(crate) enum PageAction {
     ImportBookmarks,
     /// Open the file chooser for the new tab background picture.
     ChoosePicture,
+    /// Open the releases page in a new tab (the manual way to update).
+    OpenDownloadPage,
 }
 
 #[derive(Default)]
@@ -390,6 +392,38 @@ fn search_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
     changed
 }
 
+/// A small preview of a theme: its background, a card, a button and its accent colour.
+fn theme_tile(ui: &mut egui::Ui, name: &str, palette: &crate::appearance::Palette, selected: bool) -> egui::Response {
+    let c = |rgb: [u8; 3]| Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(104.0, 78.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 10.0, c(palette.bg));
+    let ring = if selected {
+        c(palette.accent)
+    } else if response.hovered() {
+        ui.visuals().text_color().gamma_multiply(0.5)
+    } else {
+        ui.visuals().text_color().gamma_multiply(0.18)
+    };
+    painter.rect_stroke(rect, 10.0, egui::Stroke::new(if selected { 2.5 } else { 1.0 }, ring), egui::StrokeKind::Inside);
+    let card = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(rect.width() - 20.0, 24.0));
+    painter.rect_filled(card, 6.0, c(palette.surface));
+    painter.circle_filled(card.left_center() + egui::vec2(9.0, 0.0), 4.5, c(palette.accent));
+    painter.rect_filled(
+        egui::Rect::from_min_size(card.min + egui::vec2(22.0, 9.0), egui::vec2(card.width() - 34.0, 6.0)),
+        3.0,
+        c(palette.muted).gamma_multiply(0.55),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(10.0, -10.0),
+        egui::Align2::LEFT_BOTTOM,
+        name,
+        egui::FontId::proportional(13.0),
+        c(palette.text),
+    );
+    response
+}
+
 /// A round colour sample; `selected` draws a ring around it.
 fn swatch(ui: &mut egui::Ui, rgb: [u8; 3], selected: bool, name: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
@@ -414,11 +448,76 @@ fn appearance_section(
     let mut changed = false;
     card(
         ui,
-        "Colour theme",
-        Some("The accent colour of the sidebar, buttons, selections and the new tab page."),
-        "color colour accent theme palette custom personalize",
+        "Theme",
+        Some("Colours for the sidebar, settings, buttons and the new tab page."),
+        "theme light dark appearance color colour palette midnight forest sunset custom personalize",
         |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                let plain: [(&str, &str, Option<crate::appearance::Palette>); 3] = [
+                    ("system", "System", None),
+                    ("light", "Light", Some(crate::appearance::LIGHT_PREVIEW)),
+                    ("dark", "Dark", Some(crate::appearance::DARK_PREVIEW)),
+                ];
+                for (id, name, preview) in plain {
+                    let preview = preview.unwrap_or_else(|| {
+                        if ui.visuals().dark_mode {
+                            crate::appearance::DARK_PREVIEW
+                        } else {
+                            crate::appearance::LIGHT_PREVIEW
+                        }
+                    });
+                    if theme_tile(ui, name, &preview, settings.theme == id).clicked() {
+                        settings.theme = id.to_string();
+                        changed = true;
+                    }
+                }
+                for (id, name, palette) in crate::appearance::THEMES {
+                    if theme_tile(ui, name, &palette, settings.theme == id).clicked() {
+                        settings.theme = id.to_string();
+                        changed = true;
+                    }
+                }
+                let custom = crate::appearance::parse_hex(&settings.custom_bg).unwrap_or([0x1b, 0x1c, 0x1e]);
+                let custom_palette = crate::appearance::palette_for(&pteron::Settings {
+                    theme: "custom".to_string(),
+                    custom_bg: crate::appearance::to_hex(custom),
+                    accent: "auto".to_string(),
+                    ..settings.clone()
+                })
+                .unwrap_or(crate::appearance::DARK_PREVIEW);
+                if theme_tile(ui, "Custom", &custom_palette, settings.theme == "custom").clicked() {
+                    settings.theme = "custom".to_string();
+                    changed = true;
+                }
+            });
+            if settings.theme == "custom" {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let mut rgb = crate::appearance::parse_hex(&settings.custom_bg).unwrap_or([0x1b, 0x1c, 0x1e]);
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        settings.custom_bg = crate::appearance::to_hex(rgb);
+                        changed = true;
+                    }
+                    ui.label(RichText::new("Background colour. Text and buttons adjust to it.").weak());
+                });
+            }
+        },
+    );
+    card(
+        ui,
+        "Accent colour",
+        Some("Highlights, selections, the star and the new tab page glow."),
+        "color colour accent palette custom personalize highlight",
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let auto = crate::appearance::palette_for(&pteron::Settings { accent: "auto".to_string(), ..settings.clone() })
+                    .map(|p| p.accent)
+                    .unwrap_or(crate::appearance::PRESETS[0].2);
+                if swatch(ui, auto, settings.accent == "auto", "Theme default").clicked() {
+                    settings.accent = "auto".to_string();
+                    changed = true;
+                }
                 for (id, name, rgb) in crate::appearance::PRESETS {
                     if swatch(ui, rgb, settings.accent == id, name).clicked() {
                         settings.accent = id.to_string();
@@ -491,17 +590,6 @@ fn appearance_section(
                 ui.add_space(6.0);
                 ui.label(notice);
             }
-        },
-    );
-    card(
-        ui,
-        "Theme",
-        Some("Choose how Pteron looks."),
-        "theme light dark appearance color",
-        |ui| {
-            changed |= radio(ui, &mut settings.theme, "system", "Same as my system", None);
-            changed |= radio(ui, &mut settings.theme, "light", "Light", None);
-            changed |= radio(ui, &mut settings.theme, "dark", "Dark", None);
         },
     );
     card(
@@ -686,6 +774,24 @@ fn privacy_section(
     );
     card(
         ui,
+        "Ads and trackers",
+        Some("Cancels requests to well-known advertising and tracking networks. Pages load faster and use less memory."),
+        "ads adblock ad blocker tracker tracking privacy block",
+        |ui| {
+            *changed |= ui
+                .checkbox(&mut settings.adblock, "Block ads and trackers")
+                .changed();
+            let count = crate::adblock::blocked_count();
+            if count > 0 {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("Blocked {count} requests since Pteron started.")).weak());
+            }
+            ui.add_space(2.0);
+            ui.label(RichText::new("If a page looks broken, turn this off and reload.").small().weak());
+        },
+    );
+    card(
+        ui,
         "Bookmarks",
         Some(
             "Move your bookmarks between browsers or computers. Export saves Pteron-bookmarks.html \
@@ -797,9 +903,18 @@ fn updates_card(ui: &mut egui::Ui, pending: &mut Vec<PageAction>) {
                 updater::Status::Failed(message) => {
                     ui.label(RichText::new(message).color(Color32::from_rgb(214, 120, 90)));
                     ui.add_space(8.0);
-                    if ui.button("Try again").clicked() {
-                        updater::check_async();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Try again").clicked() {
+                            updater::check_async();
+                        }
+                        if ui
+                            .button("Open the download page")
+                            .on_hover_text("Download the installer yourself and run it")
+                            .clicked()
+                        {
+                            pending.push(PageAction::OpenDownloadPage);
+                        }
+                    });
                 },
             }
         },

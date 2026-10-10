@@ -32,8 +32,10 @@ pub(crate) struct Settings {
     pub engine: String,
     /// Address of the user's SearXNG instance (used when `engine` is [`SEARXNG_ID`]).
     pub searxng_url: String,
-    /// "system", "light" or "dark".
+    /// "system", "light", "dark", "custom" or the id of a theme in `appearance::THEMES`.
     pub theme: String,
+    /// Background colour of the "custom" theme (#rrggbb).
+    pub custom_bg: String,
     /// Minutes before an unused background tab is put to sleep. 0 turns sleeping off.
     pub tab_sleep_minutes: u32,
     /// Keep the sidebar visible all the time instead of sliding in from the left edge.
@@ -54,6 +56,8 @@ pub(crate) struct Settings {
     pub newtab_tiles: String,
     /// The welcome page has been shown once.
     pub welcome_shown: bool,
+    /// Block known ad and tracker networks.
+    pub adblock: bool,
     /// Colour theme: an id from `appearance::PRESETS` or "custom".
     pub accent: String,
     /// Colour used when `accent` is "custom" (#rrggbb).
@@ -70,6 +74,7 @@ impl Default for Settings {
             engine: DEFAULT_ENGINE.to_string(),
             searxng_url: String::new(),
             theme: "system".to_string(),
+            custom_bg: "#1b1c1e".to_string(),
             tab_sleep_minutes: 5,
             sidebar_pinned: false,
             startup: "newtab".to_string(),
@@ -80,7 +85,8 @@ impl Default for Settings {
             fast_start: true,
             newtab_tiles: "off".to_string(),
             welcome_shown: false,
-            accent: "gold".to_string(),
+            adblock: true,
+            accent: "auto".to_string(),
             accent_custom: "#d6aa48".to_string(),
             newtab_bg: "theme".to_string(),
             newtab_color: "#1b1c1e".to_string(),
@@ -114,8 +120,16 @@ fn load_from_disk() -> Settings {
             if let Some(url) = value.get("searxng_url").and_then(|v| v.as_str()) {
                 settings.searxng_url = url.to_string();
             }
-            if let Some(theme) = value.get("theme").and_then(|v| v.as_str()) {
+            if let Some(theme) = value.get("theme").and_then(|v| v.as_str()) &&
+                (matches!(theme, "system" | "light" | "dark" | "custom") ||
+                    crate::appearance::THEMES.iter().any(|(id, ..)| *id == theme))
+            {
                 settings.theme = theme.to_string();
+            }
+            if let Some(color) = value.get("custom_bg").and_then(|v| v.as_str()) &&
+                crate::appearance::parse_hex(color).is_some()
+            {
+                settings.custom_bg = color.to_string();
             }
             if let Some(minutes) = value.get("tab_sleep_minutes").and_then(|v| v.as_u64()) {
                 settings.tab_sleep_minutes = minutes.min(24 * 60) as u32;
@@ -146,8 +160,11 @@ fn load_from_disk() -> Settings {
             if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
                 settings.welcome_shown = shown;
             }
+            if let Some(enabled) = value.get("adblock").and_then(|v| v.as_bool()) {
+                settings.adblock = enabled;
+            }
             if let Some(accent) = value.get("accent").and_then(|v| v.as_str()) &&
-                (accent == "custom" || crate::appearance::PRESETS.iter().any(|(id, ..)| *id == accent))
+                (accent == "custom" || accent == "auto" || crate::appearance::PRESETS.iter().any(|(id, ..)| *id == accent))
             {
                 settings.accent = accent.to_string();
             }
@@ -179,7 +196,11 @@ fn load_from_disk() -> Settings {
 
 fn store() -> &'static RwLock<Settings> {
     static STORE: OnceLock<RwLock<Settings>> = OnceLock::new();
-    STORE.get_or_init(|| RwLock::new(load_from_disk()))
+    STORE.get_or_init(|| {
+        let loaded = load_from_disk();
+        crate::adblock::set_enabled(loaded.adblock);
+        RwLock::new(loaded)
+    })
 }
 
 /// The current settings.
@@ -194,6 +215,7 @@ pub(crate) fn tab_sleep_minutes() -> u32 {
 
 /// Replace the settings and save them to disk.
 pub(crate) fn update(new_settings: Settings) {
+    crate::adblock::set_enabled(new_settings.adblock);
     if let Ok(mut current) = store().write() {
         *current = new_settings.clone();
     }
@@ -207,6 +229,7 @@ pub(crate) fn update(new_settings: Settings) {
         "engine": new_settings.engine,
         "searxng_url": new_settings.searxng_url,
         "theme": new_settings.theme,
+        "custom_bg": new_settings.custom_bg,
         "tab_sleep_minutes": new_settings.tab_sleep_minutes,
         "sidebar_pinned": new_settings.sidebar_pinned,
         "startup": new_settings.startup,
@@ -217,6 +240,7 @@ pub(crate) fn update(new_settings: Settings) {
         "fast_start": new_settings.fast_start,
         "newtab_tiles": new_settings.newtab_tiles,
         "welcome_shown": new_settings.welcome_shown,
+        "adblock": new_settings.adblock,
         "accent": new_settings.accent,
         "accent_custom": new_settings.accent_custom,
         "newtab_bg": new_settings.newtab_bg,
@@ -571,7 +595,7 @@ pub(crate) fn known_issues_html() -> String {
 <li>Very long tracks (mixes over about 20 minutes) take longer to start.</li>\
 <li>Music keeps playing while you use other tabs, but only while the Music tab stays open.</li></ul></div>\
 <div class=card><h2>The browser</h2><ul>\
-<li>Windows only for now. No extensions, no ad blocker, no sync, no password manager.</li>\
+<li>Windows only for now. No extensions, no sync, no password manager and no private window. The ad blocker only covers well-known ad and tracker networks (turn it off in Settings if a page looks broken).</li>\
 <li>The installer is not signed yet, so Windows shows a &quot;protected your PC&quot; warning. Choose <b>More info</b>, then <b>Run anyway</b>.</li>\
 <li>The memory savings have not been measured against other browsers yet.</li></ul></div>\
 <p>Something not on this list? <b>Settings &rarr; About &rarr; Report a problem</b>.</p>",

@@ -81,6 +81,8 @@ pub(crate) enum Action {
     NewWindow,
     Activate(usize),
     Close(usize),
+    /// Drag a tab: move tab `from` to where tab `to` is.
+    MoveTab { from: usize, to: usize },
     Wake(usize),
     CloseSleeping(usize),
     TogglePin(usize),
@@ -316,6 +318,10 @@ pub(crate) fn show(
     height: f32,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
+    // Forget a finished tab drag.
+    if ui.input(|input| !input.pointer.any_down() && !input.pointer.any_released()) {
+        ui.memory_mut(|memory| memory.data.remove::<usize>(Id::new("pteron_tab_drag")));
+    }
     // A steady, clearly visible typing cursor. (The blinking one needs timed repaints, which
     // Pteron does not run while idle, so it could stay invisible.)
     if ui.ctx().global_style().visuals.text_cursor.blink {
@@ -702,7 +708,27 @@ fn downloads_section(ui: &mut egui::Ui) {
 
 fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Action>) {
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click_and_drag());
+    // Drag to reorder: remember which row was picked up, show a line where it would land.
+    let drag_key = Id::new("pteron_tab_drag");
+    if response.drag_started() {
+        ui.memory_mut(|memory| memory.data.insert_temp(drag_key, index));
+    }
+    let dragged: Option<usize> = ui.memory(|memory| memory.data.get_temp(drag_key));
+    if let Some(from) = dragged &&
+        from != index &&
+        ui.rect_contains_pointer(rect) &&
+        ui.input(|input| input.pointer.is_decidedly_dragging() || input.pointer.any_released())
+    {
+        let y = if from > index { rect.min.y } else { rect.max.y };
+        ui.painter().line_segment(
+            [pos2(rect.min.x + 4.0, y), pos2(rect.max.x - 4.0, y)],
+            Stroke::new(2.0, accent_color()),
+        );
+        if ui.input(|input| input.pointer.any_released()) {
+            actions.push(Action::MoveTab { from, to: index });
+        }
+    }
     let close_rect = Rect::from_min_size(
         pos2(rect.max.x - 26.0, rect.min.y + 2.0),
         vec2(24.0, ROW_HEIGHT - 4.0),

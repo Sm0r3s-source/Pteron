@@ -36,8 +36,72 @@ pub(crate) fn to_hex(rgb: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
-/// The accent colour the settings ask for.
-pub(crate) fn accent_rgb(settings: &Settings) -> [u8; 3] {
+/// The colours of a whole theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Palette {
+    pub dark: bool,
+    /// Window and sidebar background.
+    pub bg: [u8; 3],
+    /// Cards, text boxes and buttons.
+    pub surface: [u8; 3],
+    pub text: [u8; 3],
+    pub muted: [u8; 3],
+    pub accent: [u8; 3],
+}
+
+const fn palette(dark: bool, bg: [u8; 3], surface: [u8; 3], text: [u8; 3], muted: [u8; 3], accent: [u8; 3]) -> Palette {
+    Palette { dark, bg, surface, text, muted, accent }
+}
+
+/// Ready-made full themes: id, name, colours. ("system", "light" and "dark" are the plain
+/// built-in looks; "custom" is built from the user's own background colour.)
+pub(crate) const THEMES: [(&str, &str, Palette); 7] = [
+    ("midnight", "Midnight", palette(true, [0x0f, 0x14, 0x20], [0x1a, 0x21, 0x33], [0xe6, 0xeb, 0xf5], [0x8d, 0x98, 0xb0], [0x6e, 0xa8, 0xfe])),
+    ("forest", "Forest", palette(true, [0x12, 0x1a, 0x15], [0x1c, 0x28, 0x22], [0xe3, 0xec, 0xe5], [0x8a, 0xa0, 0x92], [0x5e, 0xcb, 0x8a])),
+    ("sunset", "Sunset", palette(true, [0x1d, 0x15, 0x17], [0x2b, 0x1e, 0x21], [0xf4, 0xe9, 0xe4], [0xb3, 0x9a, 0x95], [0xff, 0x8a, 0x5c])),
+    ("lavender", "Lavender", palette(true, [0x1a, 0x16, 0x25], [0x26, 0x20, 0x36], [0xec, 0xe8, 0xf6], [0x9f, 0x96, 0xb8], [0xa7, 0x8b, 0xfa])),
+    ("paper", "Paper", palette(false, [0xf3, 0xef, 0xe6], [0xff, 0xfd, 0xf8], [0x2b, 0x29, 0x23], [0x7f, 0x7a, 0x6e], [0xb5, 0x65, 0x1d])),
+    ("rose", "Rose", palette(false, [0xfb, 0xf1, 0xf4], [0xff, 0xff, 0xff], [0x3a, 0x24, 0x30], [0x8f, 0x6f, 0x7e], [0xd6, 0x45, 0x7a])),
+    ("ocean", "Ocean", palette(false, [0xea, 0xf3, 0xfa], [0xff, 0xff, 0xff], [0x17, 0x30, 0x3f], [0x58, 0x73, 0x88], [0x1f, 0x8a, 0xc0])),
+];
+
+/// Preview colours for the three built-in looks (the real ones come from egui itself).
+pub(crate) const LIGHT_PREVIEW: Palette = palette(false, [0xf6, 0xf6, 0xf6], [0xff, 0xff, 0xff], [0x20, 0x20, 0x20], [0x80, 0x80, 0x80], [0xd6, 0xaa, 0x48]);
+pub(crate) const DARK_PREVIEW: Palette = palette(true, [0x1b, 0x1b, 0x1b], [0x2a, 0x2a, 0x2a], [0xe8, 0xe8, 0xe8], [0x90, 0x90, 0x90], [0xd6, 0xaa, 0x48]);
+
+fn mix(a: [u8; 3], b: [u8; 3], amount: f32) -> [u8; 3] {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * amount).round().clamp(0.0, 255.0) as u8;
+    [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2])]
+}
+
+/// A full theme made from just a background colour.
+fn custom_palette(bg: [u8; 3], accent: [u8; 3]) -> Palette {
+    let dark = luminance(bg) < 0.5;
+    let text = if dark { [0xec, 0xeb, 0xe8] } else { [0x25, 0x23, 0x1f] };
+    let surface = if dark { mix(bg, [255, 255, 255], 0.07) } else { mix(bg, [255, 255, 255], 0.65) };
+    palette(dark, bg, surface, text, mix(text, bg, 0.42), accent)
+}
+
+/// The full theme the settings ask for, or `None` for the plain system, light and dark looks.
+pub(crate) fn palette_for(settings: &Settings) -> Option<Palette> {
+    let accent_override = match settings.accent.as_str() {
+        "auto" => None,
+        _ => Some(accent_choice(settings)),
+    };
+    let mut found = if settings.theme == "custom" {
+        let bg = parse_hex(&settings.custom_bg).unwrap_or([0x1b, 0x1c, 0x1e]);
+        Some(custom_palette(bg, PRESETS[0].2))
+    } else {
+        THEMES.iter().find(|(id, ..)| *id == settings.theme).map(|(.., p)| *p)
+    }?;
+    if let Some(accent) = accent_override {
+        found.accent = accent;
+    }
+    Some(found)
+}
+
+/// The accent the user picked from the swatches (not "auto").
+fn accent_choice(settings: &Settings) -> [u8; 3] {
     if settings.accent == "custom" {
         if let Some(rgb) = parse_hex(&settings.accent_custom) {
             return rgb;
@@ -48,6 +112,14 @@ pub(crate) fn accent_rgb(settings: &Settings) -> [u8; 3] {
         .find(|(id, ..)| *id == settings.accent)
         .map(|(.., rgb)| *rgb)
         .unwrap_or(PRESETS[0].2)
+}
+
+/// The accent colour the settings ask for.
+pub(crate) fn accent_rgb(settings: &Settings) -> [u8; 3] {
+    if settings.accent == "auto" {
+        return palette_for(settings).map(|p| p.accent).unwrap_or(PRESETS[0].2);
+    }
+    accent_choice(settings)
 }
 
 /// The accent colour in use right now.
@@ -159,6 +231,17 @@ fn newtab_style_with(settings: &Settings, picture: Option<String>) -> String {
     let mut css = format!(
         ":root{{--gold:{hex};--gold-soft:rgba({r},{g},{b},.35);--bg-glow:rgba({r},{g},{b},.16);}}"
     );
+    if let Some(p) = palette_for(settings) {
+        css.push_str(&format!(
+            ":root{{--bg:{};--text:{};--muted:{};--field:{};--field-border:{};color-scheme:{};}}",
+            to_hex(p.bg),
+            to_hex(p.text),
+            to_hex(p.muted),
+            to_hex(p.surface),
+            to_hex(mix(p.bg, p.text, 0.16)),
+            if p.dark { "dark" } else { "light" },
+        ));
+    }
     match settings.newtab_bg.as_str() {
         "gradient" => css.push_str(&format!(
             "body{{background-image:linear-gradient(160deg,rgba({r},{g},{b},.34),transparent 62%),radial-gradient(ellipse at 50% 18%,rgba({r},{g},{b},.18),transparent 55%);}}"
@@ -297,6 +380,46 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn full_themes_come_from_the_settings() {
+        let mut s = Settings::default();
+        assert!(palette_for(&s).is_none());
+        s.theme = "midnight".into();
+        let p = palette_for(&s).unwrap();
+        assert!(p.dark && p.bg == [0x0f, 0x14, 0x20]);
+        assert_eq!(accent_rgb(&s), p.accent);
+        s.accent = "rose".into();
+        assert_eq!(accent_rgb(&s), PRESETS[3].2);
+        assert_eq!(palette_for(&s).unwrap().bg, [0x0f, 0x14, 0x20]);
+        s.accent = "auto".into();
+        s.theme = "custom".into();
+        s.custom_bg = "#fff4e0".into();
+        let light = palette_for(&s).unwrap();
+        assert!(!light.dark && light.text == [0x25, 0x23, 0x1f]);
+        s.custom_bg = "#101820".into();
+        assert!(palette_for(&s).unwrap().dark);
+        s.theme = "dark".into();
+        assert!(palette_for(&s).is_none());
+        for (id, _, p) in THEMES {
+            assert!(
+                (luminance(p.bg) < 0.5) == p.dark,
+                "{id}: dark flag does not match the background"
+            );
+            assert!(
+                (luminance(p.text) - luminance(p.bg)).abs() > 0.6,
+                "{id}: text is hard to read"
+            );
+        }
+    }
+
+    #[test]
+    fn newtab_page_follows_a_full_theme() {
+        let mut s = Settings::default();
+        s.theme = "forest".into();
+        let css = newtab_style_with(&s, None);
+        assert!(css.contains("--bg:#121a15") && css.contains("color-scheme:dark"));
     }
 
     #[test]

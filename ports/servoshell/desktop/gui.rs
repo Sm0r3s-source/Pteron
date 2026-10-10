@@ -630,6 +630,11 @@ impl Gui {
                             }
                         },
                         sidebar::Action::RemoveBookmark(index) => library::remove_bookmark(index),
+                        sidebar::Action::MoveTab { from, to } => {
+                            if let (Some(from), Some(to)) = (ids.get(from), ids.get(to)) {
+                                window.move_tab(*from, *to);
+                            }
+                        },
                         sidebar::Action::TogglePin(index) => {
                             if let Some(id) = ids.get(index) {
                                 window.queue_user_interface_command(
@@ -941,6 +946,12 @@ impl Gui {
                         Ok(1) => "Imported 1 bookmark.".to_string(),
                         Ok(count) => format!("Imported {count} bookmarks."),
                         Err(message) => message,
+                    },
+                    settings_page::PageAction::OpenDownloadPage => {
+                        if let Ok(url) = Url::parse(&format!("https://github.com/{}/releases/latest", crate::updater::REPO)) {
+                            window.queue_user_interface_command(UserInterfaceCommand::NewTabWithUrl(url));
+                        }
+                        "Opened the download page in a new tab.".to_string()
                     },
                     settings_page::PageAction::ChoosePicture => {
                         crate::appearance::choose_picture_async();
@@ -1325,13 +1336,74 @@ fn embedder_image_to_egui_image(image: &Image) -> egui::ColorImage {
 
 /// Uploads all favicons that have not yet been processed to the GPU.
 /// Pteron: apply the theme setting ("system", "light" or "dark").
+/// egui colours for a full Pteron theme.
+fn visuals_for(p: &crate::appearance::Palette) -> egui::Visuals {
+    use egui::Color32;
+    let c = |rgb: [u8; 3]| Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    let mixed = |a: [u8; 3], b: [u8; 3], t: f32| {
+        let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+        Color32::from_rgb(m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2]))
+    };
+    let mut v = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let (bg, surface, text, accent) = (c(p.bg), c(p.surface), c(p.text), c(p.accent));
+    let line = mixed(p.bg, p.text, 0.16);
+    v.panel_fill = bg;
+    v.window_fill = bg;
+    v.faint_bg_color = surface;
+    v.extreme_bg_color = surface;
+    v.code_bg_color = surface;
+    v.window_stroke = egui::Stroke::new(1.0, line);
+    v.selection.bg_fill = accent.gamma_multiply(0.35);
+    v.selection.stroke = egui::Stroke::new(1.0, accent);
+    v.hyperlink_color = accent;
+    v.text_cursor.stroke.color = accent;
+    let noninteractive = &mut v.widgets.noninteractive;
+    noninteractive.bg_fill = bg;
+    noninteractive.weak_bg_fill = bg;
+    noninteractive.bg_stroke = egui::Stroke::new(1.0, line);
+    noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
+    let inactive = &mut v.widgets.inactive;
+    inactive.bg_fill = surface;
+    inactive.weak_bg_fill = surface;
+    inactive.bg_stroke = egui::Stroke::new(1.0, line);
+    inactive.fg_stroke = egui::Stroke::new(1.0, text);
+    let hovered = &mut v.widgets.hovered;
+    hovered.bg_fill = mixed(p.surface, p.accent, 0.20);
+    hovered.weak_bg_fill = mixed(p.surface, p.accent, 0.20);
+    hovered.bg_stroke = egui::Stroke::new(1.0, accent.gamma_multiply(0.7));
+    hovered.fg_stroke = egui::Stroke::new(1.5, text);
+    let active = &mut v.widgets.active;
+    active.bg_fill = mixed(p.surface, p.accent, 0.34);
+    active.weak_bg_fill = mixed(p.surface, p.accent, 0.34);
+    active.bg_stroke = egui::Stroke::new(1.0, accent);
+    active.fg_stroke = egui::Stroke::new(2.0, text);
+    let open = &mut v.widgets.open;
+    open.bg_fill = mixed(p.surface, p.accent, 0.26);
+    open.weak_bg_fill = mixed(p.surface, p.accent, 0.26);
+    open.bg_stroke = egui::Stroke::new(1.0, line);
+    open.fg_stroke = egui::Stroke::new(1.0, text);
+    v
+}
+
 fn apply_theme(ctx: &egui::Context, settings: &pteron::Settings) {
-    ctx.set_theme(match settings.theme.as_str() {
-        "light" => egui::ThemePreference::Light,
-        "dark" => egui::ThemePreference::Dark,
+    // Start from egui's plain looks every time, so switching away from a colour theme
+    // leaves nothing behind.
+    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+    let palette = crate::appearance::palette_for(settings);
+    ctx.set_theme(match (&palette, settings.theme.as_str()) {
+        (Some(p), _) if p.dark => egui::ThemePreference::Dark,
+        (Some(_), _) => egui::ThemePreference::Light,
+        (None, "light") => egui::ThemePreference::Light,
+        (None, "dark") => egui::ThemePreference::Dark,
         _ => egui::ThemePreference::System,
     });
-    // Pteron: the colour theme tints selections, links, the typing cursor and hovered outlines.
+    if let Some(p) = &palette {
+        let theme = if p.dark { egui::Theme::Dark } else { egui::Theme::Light };
+        ctx.set_visuals_of(theme, visuals_for(p));
+        return;
+    }
+    // Plain looks keep their own colours; the chosen accent tints selections and links.
     let [r, g, b] = crate::appearance::accent_rgb(settings);
     let accent = egui::Color32::from_rgb(r, g, b);
     ctx.all_styles_mut(|style| {

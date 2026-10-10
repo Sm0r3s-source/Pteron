@@ -993,6 +993,15 @@ impl WebViewDelegate for RunningAppState {
             .notify_crashed(webview, reason, backtrace);
     }
 
+    fn load_web_resource(&self, _webview: WebView, load: servo::WebResourceLoad) {
+        // Pteron: cancel requests to known ad and tracker networks.
+        let (url, main_frame) = (load.request().url.clone(), load.request().is_for_main_frame);
+        if crate::adblock::should_block(&url, main_frame) {
+            crate::adblock::note_blocked();
+            load.intercept(servo::WebResourceResponse::new(url)).cancel();
+        }
+    }
+
     fn show_console_message(&self, webview: WebView, level: ConsoleLogLevel, message: String) {
         self.platform_window_for_webview(&webview)
             .show_console_message(level, &message);
