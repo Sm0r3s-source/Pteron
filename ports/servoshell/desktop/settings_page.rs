@@ -65,6 +65,8 @@ pub(crate) enum PageAction {
     SaveReport(String),
     /// Open the page listing known problems in a new tab.
     OpenKnownIssues,
+    /// Put the report text on the clipboard.
+    CopyReport(String),
     /// Save the bookmarks as an .html file on the Desktop.
     ExportBookmarks,
     /// Import the newest bookmark file found on the Desktop or in Downloads.
@@ -831,6 +833,19 @@ fn privacy_section(
     );
     card(
         ui,
+        "Clear on exit",
+        Some("Forget what you looked at each time you close Pteron."),
+        "clear exit close history cache privacy forget",
+        |ui| {
+            *changed |= ui
+                .checkbox(&mut settings.clear_on_exit, "Clear history and cache when I close Pteron")
+                .changed();
+            ui.add_space(2.0);
+            ui.label(RichText::new("Bookmarks, settings and sign-ins (cookies) are kept.").small().weak());
+        },
+    );
+    card(
+        ui,
         "Ads and trackers",
         Some("Cancels requests to well-known advertising and tracking networks. Pages load faster and use less memory."),
         "ads adblock ad blocker tracker tracking privacy block",
@@ -1016,12 +1031,15 @@ fn about_section(
                 if ui.button("Save report to Desktop").clicked() {
                     pending.push(PageAction::SaveReport(report_note.clone()));
                 }
+                if ui.button("Copy details").clicked() {
+                    pending.push(PageAction::CopyReport(report_note.clone()));
+                }
                 if ui.button("Known problems").clicked() {
                     pending.push(PageAction::OpenKnownIssues);
                 }
             });
             if let Some(text) = notice &&
-                (text.starts_with("Saved:") || text.starts_with("Could not save"))
+                (text.starts_with("Saved:") || text.starts_with("Could not save") || text.starts_with("Copied"))
             {
                 ui.add_space(6.0);
                 ui.label(RichText::new(text).small());

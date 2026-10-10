@@ -518,6 +518,20 @@ impl HeadedWindow {
             (text == "d" && modifiers.alt_key() && !cfg!(target_os = "macos"))
     }
 
+    /// Pteron: is this key press Ctrl+Shift+T (reopen the last closed tab)?
+    fn is_reopen_tab_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        let LogicalKey::Character(text) = &event.logical_key else {
+            return false;
+        };
+        text.to_lowercase() == "t" &&
+            (modifiers.control_key() || modifiers.super_key()) &&
+            modifiers.shift_key() &&
+            !modifiers.alt_key()
+    }
+
     /// Pteron: is this key press Ctrl+F (find in page)?
     fn is_find_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> bool {
         if event.state != ElementState::Pressed {
@@ -654,6 +668,15 @@ impl HeadedWindow {
             WindowEvent::KeyboardInput {
                 event: ref key_event,
                 ..
+            } if Self::is_reopen_tab_shortcut(key_event, self.modifiers_state.get()) => {
+                // Pteron: Ctrl+Shift+T brings back the tab closed last.
+                window.queue_user_interface_command(UserInterfaceCommand::ReopenClosedTab);
+                self.winit_window.request_redraw();
+                consumed = true;
+            },
+            WindowEvent::KeyboardInput {
+                event: ref key_event,
+                ..
             } if self.gui.borrow().sidebar_mode() &&
                 Self::is_find_shortcut(key_event, self.modifiers_state.get()) =>
             {
@@ -766,6 +789,11 @@ impl HeadedWindow {
                     );
                 },
                 WindowEvent::CloseRequested => {
+                    // Pteron: "clear on exit" forgets history and empties the cache.
+                    if crate::pteron::settings().clear_on_exit {
+                        crate::library::clear_history();
+                        state.servo().network_manager().clear_cache();
+                    }
                     window.schedule_close();
                 },
                 WindowEvent::ThemeChanged(theme) => {
@@ -1112,17 +1140,12 @@ impl PlatformWindow for HeadedWindow {
         }
 
         ShortcutMatcher::from_event(keyboard_event.event)
-            .shortcut(CMD_OR_CONTROL, '=', || {
-                webview.set_page_zoom(webview.page_zoom() + 0.1);
-            })
-            .shortcut(CMD_OR_CONTROL, '+', || {
-                webview.set_page_zoom(webview.page_zoom() + 0.1);
-            })
-            .shortcut(CMD_OR_CONTROL, '-', || {
-                webview.set_page_zoom(webview.page_zoom() - 0.1);
-            })
+            .shortcut(CMD_OR_CONTROL, '=', || zoom_by(&webview, 0.1))
+            .shortcut(CMD_OR_CONTROL, '+', || zoom_by(&webview, 0.1))
+            .shortcut(CMD_OR_CONTROL, '-', || zoom_by(&webview, -0.1))
             .shortcut(CMD_OR_CONTROL, '0', || {
                 webview.set_page_zoom(1.0);
+                crate::find::note_zoom(1.0);
             })
             .shortcut(CMD_OR_CONTROL, 'R', || webview.reload())
             .shortcut(Modifiers::empty(), Key::Named(NamedKey::F5), || {
@@ -1424,4 +1447,11 @@ impl TouchEventSimulator {
         )));
         true
     }
+}
+
+/// Pteron: change the page zoom and show the new level for a moment.
+fn zoom_by(webview: &WebView, step: f32) {
+    let level = (webview.page_zoom() + step).clamp(0.25, 5.0);
+    webview.set_page_zoom(level);
+    crate::find::note_zoom(level);
 }

@@ -185,6 +185,8 @@ pub(crate) enum UserInterfaceCommand {
     Reload,
     ReloadAll,
     NewWebView,
+    /// Pteron: reopen the tab that was closed last.
+    ReopenClosedTab,
     CloseWebView(WebViewId),
     /// Pteron: open an address in a new tab.
     NewTabWithUrl(Url),

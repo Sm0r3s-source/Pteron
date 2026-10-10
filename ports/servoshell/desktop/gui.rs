@@ -539,6 +539,7 @@ impl Gui {
                                 bookmark.title.clone()
                             },
                             url: bookmark.url.clone(),
+                            folder: bookmark.folder.clone(),
                         })
                         .collect(),
                     bookmarked: current_page
@@ -549,7 +550,15 @@ impl Gui {
                         sidebar::location_focused(ctx) &&
                         !location.trim().is_empty()
                     {
-                        library::suggest(location, 6)
+                        let mut list = library::suggest(location, 6);
+                        if let Some((title, url)) = pteron::keyword_hint(location) {
+                            list.insert(
+                                0,
+                                library::Suggestion { url, title, bookmarked: false },
+                            );
+                            list.truncate(6);
+                        }
+                        list
                     } else {
                         Vec::new()
                     },
@@ -646,6 +655,9 @@ impl Gui {
                             }
                         },
                         sidebar::Action::RemoveBookmark(index) => library::remove_bookmark(index),
+                        sidebar::Action::MoveBookmark(index, folder) => {
+                            library::set_bookmark_folder(index, &folder)
+                        },
                         sidebar::Action::MoveTab { from, to } => {
                             if let (Some(from), Some(to)) = (ids.get(from), ids.get(to)) {
                                 window.move_tab(*from, *to);
@@ -967,6 +979,10 @@ impl Gui {
                         },
                         Err(message) => message,
                     },
+                    settings_page::PageAction::CopyReport(note) => {
+                        ctx.copy_text(crate::report::text(&note));
+                        "Copied the details. Paste them into a message.".to_string()
+                    },
                     settings_page::PageAction::ExportBookmarks => match library::export_bookmarks() {
                         Ok(path) => {
                             crate::report::show_in_folder(&path);
@@ -1075,6 +1091,7 @@ impl Gui {
 
             // Pteron: find in page (Ctrl+F).
             Self::show_find_bar(ctx, window);
+            Self::show_zoom_hud(ctx);
 
             // Pteron: short messages from reading mode.
             if let Some(text) = crate::reader::message() {
@@ -1158,6 +1175,21 @@ impl Gui {
 
     /// Paint the GUI, as of the last update.
     /// Pteron: the find-in-page bar, top right over the page.
+    /// Pteron: the zoom level, shown for a moment after a zoom shortcut.
+    fn show_zoom_hud(ctx: &egui::Context) {
+        let Some(percent) = crate::find::zoom_percent() else { return };
+        egui::Area::new(Id::new("pteron_zoom_hud"))
+            .order(Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new(format!("{percent}%")).size(16.0).strong());
+                });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
     fn show_find_bar(ctx: &egui::Context, window: &ServoShellWindow) {
         use crate::find;
         let active = window.active_webview();

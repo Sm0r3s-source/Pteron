@@ -31,6 +31,8 @@ pub(crate) struct Entry {
 pub(crate) struct Bookmark {
     pub url: String,
     pub title: String,
+    /// Folder name; empty when the bookmark is not in a folder.
+    pub folder: String,
 }
 
 /// A page offered while typing in the address bar (or as a shortcut on the new tab page).
@@ -124,6 +126,11 @@ fn load() -> Data {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            folder: item
+                                .get("folder")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -182,7 +189,7 @@ fn save_bookmarks(data: &Data) {
     let items: Vec<serde_json::Value> = data
         .bookmarks
         .iter()
-        .map(|b| serde_json::json!({ "url": b.url, "title": b.title }))
+        .map(|b| serde_json::json!({ "url": b.url, "title": b.title, "folder": b.folder }))
         .collect();
     write_json("bookmarks.json", &serde_json::json!({ "bookmarks": items }));
 }
@@ -294,10 +301,36 @@ pub(crate) fn toggle_bookmark(url: &str, title: &str) {
             data.bookmarks.push(Bookmark {
                 url: normalize(url),
                 title: title.to_string(),
+                folder: String::new(),
             });
         }
         save_bookmarks(data);
     });
+}
+
+/// Puts a bookmark into a folder (an empty name takes it out of its folder).
+pub(crate) fn set_bookmark_folder(index: usize, folder: &str) {
+    let folder = folder.trim().chars().take(40).collect::<String>();
+    with(|data| {
+        if let Some(bookmark) = data.bookmarks.get_mut(index) {
+            if bookmark.folder != folder {
+                bookmark.folder = folder;
+                save_bookmarks(data);
+            }
+        }
+    });
+}
+
+/// The folder names in use, sorted, without repeats.
+pub(crate) fn folder_names(list: &[Bookmark]) -> Vec<String> {
+    let mut names: Vec<String> = list
+        .iter()
+        .filter(|b| !b.folder.is_empty())
+        .map(|b| b.folder.clone())
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
 }
 
 pub(crate) fn remove_bookmark(index: usize) {
@@ -328,47 +361,96 @@ pub(crate) fn bookmarks_to_html(list: &[Bookmark]) -> String {
     let mut out = String::from(
         "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n",
     );
-    for item in list {
+    let line = |item: &Bookmark, indent: &str| {
         let title = if item.title.is_empty() { &item.url } else { &item.title };
-        out.push_str(&format!(
-            "    <DT><A HREF=\"{}\">{}</A>\n",
+        format!(
+            "{indent}<DT><A HREF=\"{}\">{}</A>\n",
             escape_html(&item.url),
             escape_html(title)
-        ));
+        )
+    };
+    for item in list.iter().filter(|b| b.folder.is_empty()) {
+        out.push_str(&line(item, "    "));
+    }
+    for name in folder_names(list) {
+        out.push_str(&format!("    <DT><H3>{}</H3>\n    <DL><p>\n", escape_html(&name)));
+        for item in list.iter().filter(|b| b.folder == name) {
+            out.push_str(&line(item, "        "));
+        }
+        out.push_str("    </DL><p>\n");
     }
     out.push_str("</DL><p>\n");
     out
 }
 
 /// Reads the links out of a bookmark file from Chrome, Edge, Firefox or Pteron.
-/// Folders are ignored; every web link is kept.
+/// A link keeps the name of the folder it was in; the browsers' own top folders
+/// (bookmarks bar, other bookmarks) count as "no folder".
 pub(crate) fn parse_bookmarks_html(text: &str) -> Vec<Bookmark> {
     let lower = text.to_ascii_lowercase();
     let mut found = Vec::new();
+    // Names of the folders we are inside ("" for an unnamed or top-level one).
+    let mut stack: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
     let mut at = 0;
-    while let Some(start) = lower[at..].find("<a ") {
-        let tag_start = at + start;
+    loop {
+        let next = [("<a ", 0), ("<h3", 1), ("<dl", 2), ("</dl", 3)]
+            .iter()
+            .filter_map(|(pat, kind)| lower[at..].find(pat).map(|i| (at + i, *kind)))
+            .min();
+        let Some((tag_start, kind)) = next else { break };
         let Some(tag_end) = lower[tag_start..].find('>').map(|i| tag_start + i) else { break };
-        let tag = &text[tag_start..tag_end];
-        let tag_lower = &lower[tag_start..tag_end];
-        let close = lower[tag_end..].find("</a>").map(|i| tag_end + i).unwrap_or(text.len());
-        at = close.min(text.len());
-        let Some(href_at) = tag_lower.find("href=") else { continue };
-        let rest = &tag[href_at + 5..];
-        let (quote, rest) = match rest.chars().next() {
-            Some(c @ ('"' | '\'')) => (Some(c), &rest[1..]),
-            _ => (None, rest),
-        };
-        let url = match quote {
-            Some(c) => rest.split(c).next().unwrap_or(""),
-            None => rest.split_whitespace().next().unwrap_or(""),
-        };
-        let url = unescape_html(url);
-        if !is_web(&url) {
-            continue;
+        match kind {
+            1 => {
+                let close = lower[tag_end..].find("</h3>").map(|i| tag_end + i).unwrap_or(text.len());
+                let attrs = &lower[tag_start..tag_end];
+                let name = if attrs.contains("personal_toolbar_folder") ||
+                    attrs.contains("unfiled_bookmarks_folder")
+                {
+                    String::new()
+                } else {
+                    unescape_html(text[tag_end + 1..close].trim())
+                };
+                pending = Some(name);
+                at = close.min(text.len());
+            },
+            2 => {
+                stack.push(pending.take().unwrap_or_default());
+                at = tag_end;
+            },
+            3 => {
+                stack.pop();
+                at = tag_end;
+            },
+            _ => {
+                let tag = &text[tag_start..tag_end];
+                let tag_lower = &lower[tag_start..tag_end];
+                let close = lower[tag_end..].find("</a>").map(|i| tag_end + i).unwrap_or(text.len());
+                at = close.min(text.len());
+                let Some(href_at) = tag_lower.find("href=") else { continue };
+                let rest = &tag[href_at + 5..];
+                let (quote, rest) = match rest.chars().next() {
+                    Some(c @ ('"' | '\'')) => (Some(c), &rest[1..]),
+                    _ => (None, rest),
+                };
+                let url = match quote {
+                    Some(c) => rest.split(c).next().unwrap_or(""),
+                    None => rest.split_whitespace().next().unwrap_or(""),
+                };
+                let url = unescape_html(url);
+                if !is_web(&url) {
+                    continue;
+                }
+                let title = unescape_html(text[tag_end + 1..close].trim());
+                let folder = stack
+                    .iter()
+                    .rev()
+                    .find(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_default();
+                found.push(Bookmark { url, title, folder });
+            },
         }
-        let title = unescape_html(text[tag_end + 1..close].trim());
-        found.push(Bookmark { url, title });
     }
     found
 }
@@ -389,7 +471,7 @@ pub(crate) fn import_bookmarks(list: Vec<Bookmark>) -> usize {
             if data.bookmarks.iter().any(|b| same_page(&b.url, &item.url)) {
                 continue;
             }
-            data.bookmarks.push(Bookmark { url: normalize(&item.url), title: item.title });
+            data.bookmarks.push(Bookmark { url: normalize(&item.url), title: item.title, folder: item.folder });
             added += 1;
         }
         if added > 0 {
@@ -532,11 +614,31 @@ fn is_error_title(title: &str) -> bool {
     )
 }
 
+/// Bookmark folders and their pages, for the new tab page.
+pub(crate) fn folder_shortcuts() -> Vec<(String, Vec<Suggestion>)> {
+    with(|data| {
+        folder_names(&data.bookmarks)
+            .into_iter()
+            .map(|name| {
+                let pages = data
+                    .bookmarks
+                    .iter()
+                    .filter(|b| b.folder == name)
+                    .map(|b| Suggestion { url: b.url.clone(), title: b.title.clone(), bookmarked: true })
+                    .collect();
+                (name, pages)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 pub(crate) fn shortcuts(limit: usize, include_history: bool) -> Vec<Suggestion> {
     with(|data| {
         let mut out: Vec<Suggestion> = data
             .bookmarks
             .iter()
+            .filter(|b| b.folder.is_empty())
             .take(limit)
             .map(|b| Suggestion {
                 url: b.url.clone(),
@@ -574,7 +676,7 @@ mod tests {
     use super::*;
 
     fn b(url: &str, title: &str) -> Bookmark {
-        Bookmark { url: url.into(), title: title.into() }
+        Bookmark { url: url.into(), title: title.into(), folder: String::new() }
     }
 
     #[test]
@@ -602,5 +704,36 @@ mod tests {
         let list = parse_bookmarks_html(html);
         assert_eq!(list, vec![b("https://www.wikipedia.org/", "Wikipedia"), b("https://news.ycombinator.com/", "Hacker News")]);
         assert!(parse_bookmarks_html("nothing here").is_empty());
+    }
+
+    #[test]
+    fn folders_round_trip_and_nest() {
+        let mut list = vec![b("https://a.example/", "A"), b("https://b.example/", "B"), b("https://c.example/", "C")];
+        list[1].folder = "Work & Study".into();
+        list[2].folder = "Work & Study".into();
+        let back = parse_bookmarks_html(&bookmarks_to_html(&list));
+        assert_eq!(back.len(), 3);
+        assert_eq!(back.iter().filter(|x| x.folder == "Work & Study").count(), 2);
+        assert_eq!(back.iter().find(|x| x.url.contains("a.example")).unwrap().folder, "");
+        assert_eq!(folder_names(&list), vec!["Work & Study".to_string()]);
+    }
+
+    #[test]
+    fn reads_folders_from_a_browser_file() {
+        let html = r#"<DL><p>
+<DT><H3 PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+<DL><p>
+<DT><A HREF="https://top.example/">Top</A>
+<DT><H3>News</H3>
+<DL><p>
+<DT><A HREF="https://news.example/">N</A>
+</DL><p>
+<DT><A HREF="https://after.example/">After</A>
+</DL><p></DL><p>"#;
+        let list = parse_bookmarks_html(html);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].folder, "");
+        assert_eq!(list[1].folder, "News");
+        assert_eq!(list[2].folder, "");
     }
 }

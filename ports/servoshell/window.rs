@@ -132,6 +132,8 @@ pub(crate) struct ServoShellWindow {
     pinned: RefCell<HashSet<WebViewId>>,
     /// Pteron: when the session file was last refreshed.
     last_session_save: Cell<Option<Instant>>,
+    /// Pteron: addresses of recently closed tabs, newest last (Ctrl+Shift+T reopens one).
+    closed_tabs: RefCell<Vec<Url>>,
 }
 
 pub(crate) enum TopLevelWebViewCreationRequest {
@@ -155,6 +157,7 @@ impl ServoShellWindow {
             media_playing: Default::default(),
             pinned: Default::default(),
             last_session_save: Default::default(),
+            closed_tabs: Default::default(),
         }
     }
 
@@ -352,8 +355,15 @@ impl ServoShellWindow {
     /// the close notification via the [`WebViewDelegate`] later.
     pub(crate) fn close_webview(&self, webview_id: WebViewId) {
         let mut webview_collection = self.webview_collection.borrow_mut();
-        if webview_collection.remove(webview_id).is_none() {
+        let Some(closed) = webview_collection.remove(webview_id) else {
             return;
+        };
+        if let Some(url) = closed.url().filter(|url| matches!(url.scheme(), "http" | "https")) {
+            let mut list = self.closed_tabs.borrow_mut();
+            list.push(url);
+            if list.len() > 20 {
+                list.remove(0);
+            }
         }
         self.last_active.borrow_mut().remove(&webview_id);
         self.media_playing.borrow_mut().remove(&webview_id);
@@ -681,6 +691,16 @@ impl ServoShellWindow {
                         state.clone(),
                         TopLevelWebViewCreationRequest::WithUrl(url),
                     );
+                },
+                UserInterfaceCommand::ReopenClosedTab => {
+                    let url = self.closed_tabs.borrow_mut().pop();
+                    if let Some(url) = url {
+                        self.set_needs_update();
+                        self.create_and_activate_toplevel_webview(
+                            state.clone(),
+                            TopLevelWebViewCreationRequest::WithUrl(url),
+                        );
+                    }
                 },
                 UserInterfaceCommand::TogglePin(id) => self.toggle_pin(id),
                 UserInterfaceCommand::TogglePinSleeping(index) => {

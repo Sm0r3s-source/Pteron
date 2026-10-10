@@ -33,6 +33,7 @@ pub(crate) struct TabRow {
 pub(crate) struct BookmarkRow {
     pub label: String,
     pub url: String,
+    pub folder: String,
 }
 
 /// One sleeping tab, as shown in the list.
@@ -93,6 +94,8 @@ pub(crate) enum Action {
     OpenBookmark(usize),
     OpenBookmarkInNewTab(usize),
     RemoveBookmark(usize),
+    /// Put a bookmark into a folder (empty name: no folder).
+    MoveBookmark(usize, String),
     SetExperimental(bool),
     ToggleSettings,
 }
@@ -573,8 +576,30 @@ fn framed(
                                 ui.add_space(6.0);
                                 ui.separator();
                                 ui.label(RichText::new("Bookmarks").small().weak());
+                                let mut folders: Vec<&str> = model
+                                    .bookmarks
+                                    .iter()
+                                    .filter(|b| !b.folder.is_empty())
+                                    .map(|b| b.folder.as_str())
+                                    .collect();
+                                folders.sort_by_key(|name| name.to_lowercase());
+                                folders.dedup();
                                 for (index, bookmark) in model.bookmarks.iter().enumerate() {
-                                    bookmark_row(ui, index, bookmark, actions);
+                                    if bookmark.folder.is_empty() {
+                                        bookmark_row(ui, index, bookmark, &folders, actions);
+                                    }
+                                }
+                                for name in &folders {
+                                    egui::CollapsingHeader::new(RichText::new(*name).size(13.0))
+                                        .id_salt(("pteron_bookmark_folder", *name))
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            for (index, bookmark) in model.bookmarks.iter().enumerate() {
+                                                if bookmark.folder == *name {
+                                                    bookmark_row(ui, index, bookmark, &folders, actions);
+                                                }
+                                            }
+                                        });
                                 }
                             }
                         });
@@ -871,7 +896,13 @@ fn suggestion_popup(
 }
 
 /// A bookmark: click opens it here, middle-click opens it in a new tab.
-fn bookmark_row(ui: &mut egui::Ui, index: usize, bookmark: &BookmarkRow, actions: &mut Vec<Action>) {
+fn bookmark_row(
+    ui: &mut egui::Ui,
+    index: usize,
+    bookmark: &BookmarkRow,
+    folders: &[&str],
+    actions: &mut Vec<Action>,
+) {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
     let visuals = ui.visuals();
@@ -901,6 +932,30 @@ fn bookmark_row(ui: &mut egui::Ui, index: usize, bookmark: &BookmarkRow, actions
             actions.push(Action::OpenBookmarkInNewTab(index));
             ui.close();
         }
+        ui.menu_button("Move to folder", |ui| {
+            if !bookmark.folder.is_empty() && ui.button("No folder").clicked() {
+                actions.push(Action::MoveBookmark(index, String::new()));
+                ui.close();
+            }
+            for name in folders {
+                if *name != bookmark.folder && ui.button(*name).clicked() {
+                    actions.push(Action::MoveBookmark(index, name.to_string()));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.label(RichText::new("New folder").small().weak());
+            let id = Id::new(("pteron_new_folder", index));
+            let mut text = ui.memory_mut(|m| m.data.get_temp::<String>(id).unwrap_or_default());
+            let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(140.0));
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if enter && !text.trim().is_empty() {
+                actions.push(Action::MoveBookmark(index, text.trim().to_string()));
+                text.clear();
+                ui.close();
+            }
+            ui.memory_mut(|m| m.data.insert_temp(id, text));
+        });
         if ui.button("Remove bookmark").clicked() {
             actions.push(Action::RemoveBookmark(index));
             ui.close();

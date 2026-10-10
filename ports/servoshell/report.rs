@@ -93,7 +93,8 @@ fn file_name(now_secs: i64) -> String {
 }
 
 /// Writes the report on the Desktop (or the home folder) and returns where it is.
-pub(crate) fn save(note: &str) -> Result<PathBuf, String> {
+/// The report text (what `save` writes, and what "Copy details" puts on the clipboard).
+pub(crate) fn text(note: &str) -> String {
     let now = std::time::SystemTime::now();
     let secs = crate::crashlog::unix_secs(now);
     let (log_name, mut log_tail) = newest_crash_log().unwrap_or_else(|| ("none".to_string(), String::new()));
@@ -106,7 +107,7 @@ pub(crate) fn save(note: &str) -> Result<PathBuf, String> {
         log_tail.push_str(&tail_lines(&text, 40));
     }
     let settings = std::fs::read_to_string(crate::pteron::settings_file_path()).unwrap_or_default();
-    let text = compose(
+    compose(
         crate::updater::BUILD,
         &crate::crashlog::timestamp(secs),
         &machine_info(),
@@ -114,7 +115,12 @@ pub(crate) fn save(note: &str) -> Result<PathBuf, String> {
         &log_name,
         &log_tail,
         note,
-    );
+    )
+}
+
+pub(crate) fn save(note: &str) -> Result<PathBuf, String> {
+    let secs = crate::crashlog::unix_secs(std::time::SystemTime::now());
+    let text = text(note);
     let dir = ::dirs::desktop_dir()
         .or_else(::dirs::home_dir)
         .ok_or_else(|| "Could not find the Desktop folder.".to_string())?;

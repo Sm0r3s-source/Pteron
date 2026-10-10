@@ -60,6 +60,8 @@ pub(crate) struct Settings {
     pub sync_folder: String,
     /// Warn before opening a page over plain http.
     pub https_warning: bool,
+    /// Forget the browsing history and empty the cache when the window is closed.
+    pub clear_on_exit: bool,
     /// Block known ad and tracker networks.
     pub adblock: bool,
     /// Colour theme: an id from `appearance::PRESETS` or "custom".
@@ -91,6 +93,7 @@ impl Default for Settings {
             welcome_shown: false,
             sync_folder: String::new(),
             https_warning: true,
+            clear_on_exit: false,
             adblock: true,
             accent: "auto".to_string(),
             accent_custom: "#d6aa48".to_string(),
@@ -158,6 +161,9 @@ pub(crate) fn apply_json(settings: &mut Settings, value: &serde_json::Value) {
     }
     if let Some(shown) = value.get("welcome_shown").and_then(|v| v.as_bool()) {
         settings.welcome_shown = shown;
+    }
+    if let Some(enabled) = value.get("clear_on_exit").and_then(|v| v.as_bool()) {
+        settings.clear_on_exit = enabled;
     }
     if let Some(enabled) = value.get("https_warning").and_then(|v| v.as_bool()) {
         settings.https_warning = enabled;
@@ -261,6 +267,7 @@ pub(crate) fn update(new_settings: Settings) {
         "welcome_shown": new_settings.welcome_shown,
         "sync_folder": new_settings.sync_folder,
         "https_warning": new_settings.https_warning,
+        "clear_on_exit": new_settings.clear_on_exit,
         "adblock": new_settings.adblock,
         "accent": new_settings.accent,
         "accent_custom": new_settings.accent_custom,
@@ -450,6 +457,26 @@ fn engine_label(settings: &Settings) -> String {
         .unwrap_or_else(|| "the web".to_string())
 }
 
+/// One round tile on the new tab page.
+fn tile_html(suggestion: &crate::library::Suggestion) -> String {
+    let host = url::Url::parse(&suggestion.url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.trim_start_matches("www.").to_string()))
+        .unwrap_or_default();
+    let letter = host
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "·".to_string());
+    let name = if suggestion.title.is_empty() { host.clone() } else { suggestion.title.clone() };
+    format!(
+        "<a class=\"tile\" href=\"{}\"><span class=\"ico\">{}</span><span class=\"name\">{}</span></a>",
+        html_escape(&suggestion.url),
+        html_escape(&letter),
+        html_escape(&name),
+    )
+}
+
 /// Tiles for the pages the user bookmarked or visits most.
 fn shortcuts_html() -> String {
     let mut html = String::new();
@@ -458,26 +485,22 @@ fn shortcuts_html() -> String {
         return html;
     }
     for suggestion in crate::library::shortcuts(8, mode == "frequent") {
-        let host = url::Url::parse(&suggestion.url)
-            .ok()
-            .and_then(|url| url.host_str().map(|host| host.trim_start_matches("www.").to_string()))
-            .unwrap_or_default();
-        let letter = host
-            .chars()
-            .find(|c| c.is_alphanumeric())
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "·".to_string());
-        let name = if suggestion.title.is_empty() {
-            host.clone()
-        } else {
-            suggestion.title.clone()
-        };
-        html.push_str(&format!(
-            "<a class=\"tile\" href=\"{}\"><span class=\"ico\">{}</span><span class=\"name\">{}</span></a>",
-            html_escape(&suggestion.url),
-            html_escape(&letter),
-            html_escape(&name),
-        ));
+        html.push_str(&tile_html(&suggestion));
+    }
+    let folders = crate::library::folder_shortcuts();
+    if !folders.is_empty() {
+        html.push_str(
+            "<style>.folders{width:100%;margin-top:14px;text-align:left}.folders details{margin:6px 0}\
+.folders summary{cursor:pointer;padding:6px 4px;opacity:.85}.folders .shortcuts{margin-top:6px}</style><div class=\"folders\">",
+        );
+        for (name, pages) in folders {
+            html.push_str(&format!("<details><summary>{}</summary><div class=\"shortcuts\">", html_escape(&name)));
+            for page in &pages {
+                html.push_str(&tile_html(page));
+            }
+            html.push_str("</div></details>");
+        }
+        html.push_str("</div>");
     }
     html
 }
@@ -611,6 +634,8 @@ pub(crate) fn known_issues_html() -> String {
 <div class=card><h2>Reading mode, sync and security</h2><ul>\
 <li>Reading mode (the <b>Aa</b> button) works on articles; on other pages it says it found nothing.</li>\
 <li>Sync works through a folder you choose and covers bookmarks and settings only. If both computers change the same thing before they sync, the newer change wins.</li>\
+<li>Bookmark folders are one level deep. Address bar shortcuts: <b>g</b>, <b>ddg</b>, <b>yt</b>, <b>w</b>, <b>gh</b>, <b>maps</b>, <b>r</b> followed by a space and your search (for example <i>yt lofi</i>).</li>\
+<li>On Google results the &quot;About this result&quot; dots and the translate link are hidden, because the engine draws them in the wrong place.</li>\
 <li>The http warning appears for sites without https. Some old sites have no https version.</li></ul></div>\
 <div class=card><h2>YouTube</h2><ul>\
 <li>Videos play up to 1080p60 in the H.264 format. VP9, AV1 and 4K are not supported.</li>\
@@ -621,7 +646,7 @@ pub(crate) fn known_issues_html() -> String {
 <li>Very long tracks (mixes over about 20 minutes) take longer to start.</li>\
 <li>Music keeps playing while you use other tabs, but only while the Music tab stays open.</li></ul></div>\
 <div class=card><h2>The browser</h2><ul>\
-<li>Windows only for now. No extensions, no sync, no password manager and no private window. The ad blocker only covers well-known ad and tracker networks (turn it off in Settings if a page looks broken).</li>\
+<li>Windows only for now. No extensions, no password manager yet and no private window. The ad blocker only covers well-known ad and tracker networks (turn it off in Settings if a page looks broken).</li>\
 <li>The installer is not signed yet, so Windows shows a &quot;protected your PC&quot; warning. Choose <b>More info</b>, then <b>Run anyway</b>.</li>\
 <li>The memory savings have not been measured against other browsers yet.</li></ul></div>\
 <p>Something not on this list? <b>Settings &rarr; About &rarr; Report a problem</b>.</p>",
@@ -645,5 +670,55 @@ mod google_fix_tests {
     fn script_is_scoped_to_google() {
         assert!(super::GOOGLE_FIX_SCRIPT.contains("google\\.[a-z.]+$"));
         assert!(super::GOOGLE_FIX_SCRIPT.contains("aria-haspopup"));
+    }
+}
+
+/// Address bar shortcuts: "yt lofi" searches YouTube, "w rust" Wikipedia, and so on.
+pub(crate) const KEYWORDS: &[(&str, &str, &str)] = &[
+    ("g", "Google", "https://www.google.com/search?q=%s"),
+    ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q=%s"),
+    ("yt", "YouTube", "https://www.youtube.com/results?search_query=%s"),
+    ("w", "Wikipedia", "https://en.wikipedia.org/w/index.php?search=%s"),
+    ("gh", "GitHub", "https://github.com/search?q=%s"),
+    ("maps", "OpenStreetMap", "https://www.openstreetmap.org/search?query=%s"),
+    ("r", "Reddit", "https://www.reddit.com/search/?q=%s"),
+];
+
+/// The row shown first under the address bar for a shortcut: ("Search YouTube for lofi", url).
+pub(crate) fn keyword_hint(text: &str) -> Option<(String, String)> {
+    let url = expand_keyword(text)?;
+    let (word, rest) = text.trim().split_once(' ')?;
+    let word = word.to_lowercase();
+    let (_, name, _) = KEYWORDS.iter().find(|(key, ..)| *key == word)?;
+    Some((format!("Search {name} for {}", rest.trim()), url))
+}
+
+/// "yt lofi beats" -> the YouTube results URL. `None` when the text does not start with a
+/// shortcut followed by a space and something to search for.
+pub(crate) fn expand_keyword(text: &str) -> Option<String> {
+    let text = text.trim();
+    let (word, rest) = text.split_once(' ')?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let word = word.to_lowercase();
+    let (_, _, template) = KEYWORDS.iter().find(|(key, ..)| *key == word)?;
+    Some(template.replace("%s", &encode_query(rest)))
+}
+
+#[cfg(test)]
+mod keyword_tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_expand() {
+        assert!(expand_keyword("yt lofi").unwrap().starts_with("https://www.youtube.com/results?search_query=lofi"));
+        assert!(expand_keyword("W rust lang").unwrap().contains("wikipedia.org"));
+        assert_eq!(keyword_hint("yt lofi beats").unwrap().0, "Search YouTube for lofi beats");
+        assert_eq!(keyword_hint("nope x"), None);
+        assert_eq!(expand_keyword("yt"), None);
+        assert_eq!(expand_keyword("yt   "), None);
+        assert_eq!(expand_keyword("hello world"), None);
     }
 }

@@ -56,7 +56,7 @@ pub(crate) fn to_json(snapshot: &Snapshot) -> serde_json::Value {
     let items: Vec<serde_json::Value> = snapshot
         .bookmarks
         .iter()
-        .map(|b| serde_json::json!({ "url": b.url, "title": b.title }))
+        .map(|b| serde_json::json!({ "url": b.url, "title": b.title, "folder": b.folder }))
         .collect();
     serde_json::json!({
         "app": "pteron",
@@ -82,7 +82,11 @@ pub(crate) fn from_json(value: &serde_json::Value) -> Option<Snapshot> {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return None;
             }
-            Some(Bookmark { url, title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string() })
+            Some(Bookmark {
+                url,
+                title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                folder: item.get("folder").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            })
         })
         .collect();
     Some(Snapshot {
@@ -340,8 +344,8 @@ mod tests {
     fn sample() -> Snapshot {
         Snapshot {
             bookmarks: vec![
-                Bookmark { url: "https://example.com/a".into(), title: "A".into() },
-                Bookmark { url: "http://example.org/".into(), title: "".into() },
+                Bookmark { url: "https://example.com/a".into(), title: "A".into(), folder: "F".into() },
+                Bookmark { url: "http://example.org/".into(), title: "".into(), folder: String::new() },
             ],
             bookmarks_modified: 1_700_000_000,
             settings: serde_json::json!({ "theme": "midnight", "adblock": false }),

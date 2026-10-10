@@ -29,6 +29,25 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(&mut guard)
 }
 
+/// The zoom level shown briefly after Ctrl +, Ctrl - or Ctrl 0.
+fn zoom_note() -> &'static Mutex<Option<(f32, std::time::Instant)>> {
+    static NOTE: OnceLock<Mutex<Option<(f32, std::time::Instant)>>> = OnceLock::new();
+    NOTE.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn note_zoom(level: f32) {
+    if let Ok(mut note) = zoom_note().lock() {
+        *note = Some((level, std::time::Instant::now()));
+    }
+}
+
+/// The zoom level to show right now, as a percentage, or `None` once it has faded.
+pub(crate) fn zoom_percent() -> Option<u32> {
+    let note = zoom_note().lock().ok()?;
+    let (level, at) = (*note)?;
+    (at.elapsed() < std::time::Duration::from_millis(1600)).then(|| (level * 100.0).round() as u32)
+}
+
 pub(crate) fn open() {
     with(|s| {
         s.open = true;
