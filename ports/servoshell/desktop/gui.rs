@@ -919,6 +919,19 @@ impl Gui {
                         },
                         Err(message) => message,
                     },
+                    settings_page::PageAction::ExportBookmarks => match library::export_bookmarks() {
+                        Ok(path) => {
+                            crate::report::show_in_folder(&path);
+                            format!("Saved: {}", path.display())
+                        },
+                        Err(message) => message,
+                    },
+                    settings_page::PageAction::ImportBookmarks => match library::import_from_downloads() {
+                        Ok(0) => "Nothing new: all those bookmarks were already saved.".to_string(),
+                        Ok(1) => "Imported 1 bookmark.".to_string(),
+                        Ok(count) => format!("Imported {count} bookmarks."),
+                        Err(message) => message,
+                    },
                     settings_page::PageAction::OpenKnownIssues => {
                         if let Ok(url) = Url::parse("servo:known-issues") {
                             window.queue_user_interface_command(UserInterfaceCommand::NewTabWithUrl(url));
@@ -983,6 +996,9 @@ impl Gui {
                 )
                 .show(|ui| ui.add(Label::new(status_text.clone()).extend()));
             }
+
+            // Pteron: find in page (Ctrl+F).
+            Self::show_find_bar(ctx, window);
 
             // Pteron: tell the user when a pop-up was blocked.
             if let Some(count) = pteron::popup_notice() {
@@ -1052,6 +1068,103 @@ impl Gui {
     }
 
     /// Paint the GUI, as of the last update.
+    /// Pteron: the find-in-page bar, top right over the page.
+    fn show_find_bar(ctx: &egui::Context, window: &ServoShellWindow) {
+        use crate::find;
+        let active = window.active_webview();
+        let tab_id = active.as_ref().map(|webview| format!("{:?}", webview.id()));
+        // Another tab was shown: the bar closes.
+        find::with(|state| {
+            if state.open && state.tab.is_some() && state.tab != tab_id {
+                state.open = false;
+            }
+        });
+        let (open, mut query, result, focus) =
+            find::with(|s| (s.open, s.query.clone(), s.result.clone(), std::mem::take(&mut s.focus)));
+        let Some(webview) = active else { return };
+        if !open {
+            return;
+        }
+        find::with(|s| s.tab = tab_id);
+        let input_id = Id::new("pteron_find_input");
+        let mut direction: Option<i32> = None;
+        let mut close = false;
+        let mut changed = false;
+        egui::Area::new(Id::new("pteron_find_bar"))
+            .order(Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 12.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut query)
+                                .id(input_id)
+                                .hint_text("Find in page")
+                                .desired_width(200.0),
+                        );
+                        if focus {
+                            edit.request_focus();
+                        }
+                        changed = edit.changed();
+                        if edit.has_focus() || edit.lost_focus() {
+                            let (enter, shift, escape) = ui.input(|i| {
+                                (
+                                    i.key_pressed(egui::Key::Enter),
+                                    i.modifiers.shift,
+                                    i.key_pressed(egui::Key::Escape),
+                                )
+                            });
+                            if enter {
+                                direction = Some(if shift { -1 } else { 1 });
+                                edit.request_focus();
+                            }
+                            if escape {
+                                close = true;
+                            }
+                        }
+                        let label = if query.is_empty() {
+                            String::new()
+                        } else if result.is_empty() || result == "0/0" {
+                            "No matches".to_string()
+                        } else {
+                            result.replace('/', " of ")
+                        };
+                        ui.label(label);
+                        if ui.small_button("\u{25B2}").on_hover_text("Previous (Shift+Enter)").clicked() {
+                            direction = Some(-1);
+                        }
+                        if ui.small_button("\u{25BC}").on_hover_text("Next (Enter)").clicked() {
+                            direction = Some(1);
+                        }
+                        if ui.small_button("\u{2715}").on_hover_text("Close (Esc)").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if close {
+            // Remove the highlights, then give the keyboard back to the page.
+            webview.evaluate_javascript(find::script("", 0), |_| {});
+            ctx.memory_mut(|memory| memory.surrender_focus(input_id));
+            find::with(|s| {
+                s.open = false;
+                s.query.clear();
+                s.result.clear();
+            });
+            return;
+        }
+        let step = if changed { Some(0) } else { direction };
+        find::with(|s| s.query = query.clone());
+        if let Some(step) = step {
+            webview.evaluate_javascript(find::script(&query, step), |value| {
+                if let Ok(servo::JSValue::String(text)) = value {
+                    find::with(|s| s.result = text);
+                }
+            });
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
     pub(crate) fn paint(&mut self, window: &Window) {
         self.rendering_context
             .make_current()

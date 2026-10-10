@@ -65,6 +65,10 @@ pub(crate) enum PageAction {
     SaveReport(String),
     /// Open the page listing known problems in a new tab.
     OpenKnownIssues,
+    /// Save the bookmarks as an .html file on the Desktop.
+    ExportBookmarks,
+    /// Import the newest bookmark file found on the Desktop or in Downloads.
+    ImportBookmarks,
 }
 
 #[derive(Default)]
@@ -572,6 +576,26 @@ fn privacy_section(
             if ui.button("Clear browsing history").clicked() {
                 pending.push(PageAction::ClearHistory);
             }
+        },
+    );
+    card(
+        ui,
+        "Bookmarks",
+        Some(
+            "Move your bookmarks between browsers or computers. Export saves Pteron-bookmarks.html \
+             on the Desktop. To import, export a bookmark file from Chrome, Edge or Firefox into \
+             Downloads or the Desktop, then press Import.",
+        ),
+        "bookmarks import export chrome firefox edge transfer move",
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Export bookmarks").clicked() {
+                    pending.push(PageAction::ExportBookmarks);
+                }
+                if ui.button("Import bookmarks").clicked() {
+                    pending.push(PageAction::ImportBookmarks);
+                }
+            });
         },
     );
     card(

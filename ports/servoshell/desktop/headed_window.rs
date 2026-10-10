@@ -518,6 +518,17 @@ impl HeadedWindow {
             (text == "d" && modifiers.alt_key() && !cfg!(target_os = "macos"))
     }
 
+    /// Pteron: is this key press Ctrl+F (find in page)?
+    fn is_find_shortcut(event: &KeyEvent, modifiers: ModifiersState) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        let LogicalKey::Character(text) = &event.logical_key else {
+            return false;
+        };
+        text.to_lowercase() == "f" && (modifiers.control_key() || modifiers.super_key()) && !modifiers.alt_key()
+    }
+
     fn toolbar_height(&self) -> Length<f32, DeviceIndependentPixel> {
         self.gui.borrow().toolbar_height()
     }
@@ -637,6 +648,17 @@ impl HeadedWindow {
             {
                 // Pteron: Ctrl+L / Alt+D opens the sidebar and focuses the address bar.
                 self.gui.borrow_mut().focus_location();
+                self.winit_window.request_redraw();
+                consumed = true;
+            },
+            WindowEvent::KeyboardInput {
+                event: ref key_event,
+                ..
+            } if self.gui.borrow().sidebar_mode() &&
+                Self::is_find_shortcut(key_event, self.modifiers_state.get()) =>
+            {
+                // Pteron: Ctrl+F opens the find bar.
+                crate::find::open();
                 self.winit_window.request_redraw();
                 consumed = true;
             },

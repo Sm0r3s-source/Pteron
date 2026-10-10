@@ -308,6 +308,131 @@ pub(crate) fn remove_bookmark(index: usize) {
     });
 }
 
+// ---------------------------------------------------------------- import and export
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// The bookmarks in the file format every browser can import ("Netscape bookmark file").
+pub(crate) fn bookmarks_to_html(list: &[Bookmark]) -> String {
+    let mut out = String::from(
+        "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n",
+    );
+    for item in list {
+        let title = if item.title.is_empty() { &item.url } else { &item.title };
+        out.push_str(&format!(
+            "    <DT><A HREF=\"{}\">{}</A>\n",
+            escape_html(&item.url),
+            escape_html(title)
+        ));
+    }
+    out.push_str("</DL><p>\n");
+    out
+}
+
+/// Reads the links out of a bookmark file from Chrome, Edge, Firefox or Pteron.
+/// Folders are ignored; every web link is kept.
+pub(crate) fn parse_bookmarks_html(text: &str) -> Vec<Bookmark> {
+    let lower = text.to_ascii_lowercase();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<a ") {
+        let tag_start = at + start;
+        let Some(tag_end) = lower[tag_start..].find('>').map(|i| tag_start + i) else { break };
+        let tag = &text[tag_start..tag_end];
+        let tag_lower = &lower[tag_start..tag_end];
+        let close = lower[tag_end..].find("</a>").map(|i| tag_end + i).unwrap_or(text.len());
+        at = close.min(text.len());
+        let Some(href_at) = tag_lower.find("href=") else { continue };
+        let rest = &tag[href_at + 5..];
+        let (quote, rest) = match rest.chars().next() {
+            Some(c @ ('"' | '\'')) => (Some(c), &rest[1..]),
+            _ => (None, rest),
+        };
+        let url = match quote {
+            Some(c) => rest.split(c).next().unwrap_or(""),
+            None => rest.split_whitespace().next().unwrap_or(""),
+        };
+        let url = unescape_html(url);
+        if !is_web(&url) {
+            continue;
+        }
+        let title = unescape_html(text[tag_end + 1..close].trim());
+        found.push(Bookmark { url, title });
+    }
+    found
+}
+
+/// Adds the bookmarks that are not saved yet. Returns how many were new.
+pub(crate) fn import_bookmarks(list: Vec<Bookmark>) -> usize {
+    with(|data| {
+        let mut added = 0;
+        for item in list {
+            if data.bookmarks.iter().any(|b| same_page(&b.url, &item.url)) {
+                continue;
+            }
+            data.bookmarks.push(Bookmark { url: normalize(&item.url), title: item.title });
+            added += 1;
+        }
+        if added > 0 {
+            save_bookmarks(data);
+        }
+        added
+    })
+    .unwrap_or(0)
+}
+
+/// Writes the bookmarks to the Desktop. Returns the file.
+pub(crate) fn export_bookmarks() -> Result<PathBuf, String> {
+    let list = bookmarks();
+    if list.is_empty() {
+        return Err("There are no bookmarks to export yet.".into());
+    }
+    let dir = ::dirs::desktop_dir()
+        .or_else(::dirs::home_dir)
+        .ok_or_else(|| "Could not find the Desktop folder.".to_string())?;
+    let path = dir.join("Pteron-bookmarks.html");
+    std::fs::write(&path, bookmarks_to_html(&list)).map_err(|e| format!("Could not save the file: {e}"))?;
+    Ok(path)
+}
+
+/// Looks on the Desktop and in Downloads for the newest bookmark file (an .html file with
+/// "bookmark" in its name, which is what Chrome, Edge and Firefox export) and imports it.
+pub(crate) fn import_from_downloads() -> Result<usize, String> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for dir in [::dirs::desktop_dir(), ::dirs::download_dir()].into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !name.contains("bookmark") || !(name.ends_with(".html") || name.ends_with(".htm")) {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
+            if best.as_ref().map_or(true, |(time, _)| modified > *time) {
+                best = Some((modified, entry.path()));
+            }
+        }
+    }
+    let (_, path) = best.ok_or_else(|| {
+        "No bookmark file found. Export one from Chrome, Edge or Firefox into Downloads or the Desktop first.".to_string()
+    })?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    let list = parse_bookmarks_html(&text);
+    if list.is_empty() {
+        return Err(format!("{} has no bookmarks in it.", path.display()));
+    }
+    Ok(import_bookmarks(list))
+}
+
 fn bare(url: &str) -> String {
     let url = url
         .trim_start_matches("https://")
@@ -433,4 +558,40 @@ pub(crate) fn shortcuts(limit: usize, include_history: bool) -> Vec<Suggestion> 
         out
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(url: &str, title: &str) -> Bookmark {
+        Bookmark { url: url.into(), title: title.into() }
+    }
+
+    #[test]
+    fn export_then_import_round_trips() {
+        let list = vec![b("https://example.com/a?x=1&y=2", "Tom & \"Jerry\" <3"), b("https://rust-lang.org/", "")];
+        let html = bookmarks_to_html(&list);
+        let back = parse_bookmarks_html(&html);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0], list[0]);
+        assert_eq!(back[1].url, "https://rust-lang.org/");
+    }
+
+    #[test]
+    fn reads_a_chrome_style_file() {
+        let html = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+  <DT><H3 ADD_DATE="1" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+  <DL><p>
+    <DT><A HREF="https://www.wikipedia.org/" ADD_DATE="16" ICON="data:image/png;base64,AAAA">Wikipedia</A>
+    <DT><a href='https://news.ycombinator.com/' >Hacker News</a>
+    <DT><A HREF="javascript:alert(1)">bad</A>
+    <DT><A HREF="chrome://settings">internal</A>
+  </DL><p>
+</DL><p>"#;
+        let list = parse_bookmarks_html(html);
+        assert_eq!(list, vec![b("https://www.wikipedia.org/", "Wikipedia"), b("https://news.ycombinator.com/", "Hacker News")]);
+        assert!(parse_bookmarks_html("nothing here").is_empty());
+    }
 }
