@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::streamproxy::{UPSTREAM_USER_AGENT, curl_command};
+use crate::streamproxy::UPSTREAM_USER_AGENT;
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 36;
+pub(crate) const BUILD: u32 = 37;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";
@@ -86,6 +86,13 @@ fn download_prefix() -> String {
     format!("https://github.com/{REPO}/releases/download/")
 }
 
+/// Whether `url` is a download link of this repository (GitHub ignores upper/lower case in
+/// repository names and may hand out either spelling).
+fn is_release_url(url: &str) -> bool {
+    let prefix = download_prefix();
+    url.len() >= prefix.len() && url.is_char_boundary(prefix.len()) && url[..prefix.len()].eq_ignore_ascii_case(&prefix)
+}
+
 /// The release described by GitHub's `releases/latest` answer, if it is a Pteron zip release.
 pub(crate) fn parse_release(text: &str) -> Option<Release> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -99,7 +106,7 @@ pub(crate) fn parse_release(text: &str) -> Option<Release> {
     })?;
     let zip_name = zip.get("name")?.as_str()?;
     let url = zip.get("browser_download_url")?.as_str()?.to_string();
-    if !url.starts_with(&download_prefix()) || url.contains(['"', ' ', '\'', '`']) {
+    if !is_release_url(&url) || url.contains(['"', ' ', '\'', '`']) {
         return None;
     }
     let sha256_url = assets
@@ -107,7 +114,7 @@ pub(crate) fn parse_release(text: &str) -> Option<Release> {
         .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(&format!("{zip_name}.sha256")))
         .and_then(|a| a.get("browser_download_url"))
         .and_then(|u| u.as_str())
-        .filter(|u| u.starts_with(&download_prefix()))
+        .filter(|u| is_release_url(u))
         .map(str::to_string);
     let notes: String = value
         .get("body")
@@ -142,14 +149,58 @@ pub(crate) fn parse_sha256(text: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- talking to the network
 
+/// Programs to try for curl: the plain name first, then the copy in the Windows folder.
+fn curl_programs() -> Vec<String> {
+    if !cfg!(windows) {
+        return vec!["curl".to_string()];
+    }
+    let mut programs = vec!["curl.exe".to_string()];
+    if let Ok(root) = std::env::var("SystemRoot") {
+        programs.push(format!("{root}\\System32\\curl.exe"));
+    }
+    programs
+}
+
+fn curl_with(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command.stdin(std::process::Stdio::null());
+    command
+}
+
+/// Starts curl and runs `start` on it. If Windows refuses to start the program (it has been seen
+/// to do so now and then), try again a moment later and then with the full path.
+fn with_curl<T>(
+    mut start: impl FnMut(std::process::Command) -> std::io::Result<T>,
+) -> Result<T, String> {
+    let mut last = String::new();
+    for program in curl_programs() {
+        for attempt in 0..3 {
+            match start(curl_with(&program)) {
+                Ok(value) => return Ok(value),
+                Err(error) => last = error.to_string(),
+            }
+            if attempt < 2 {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }
+    }
+    Err(format!("Could not start curl: {last}"))
+}
+
 fn fetch_text(url: &str) -> Result<String, String> {
-    let output = curl_command()
-        .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "20", "-A", UPSTREAM_USER_AGENT])
-        .args(["-H", "Accept: application/vnd.github+json"])
-        .arg("--")
-        .arg(url)
-        .output()
-        .map_err(|e| format!("Could not start curl: {e}"))?;
+    let output = with_curl(|mut command| {
+        command
+            .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "20", "-A", UPSTREAM_USER_AGENT])
+            .args(["-H", "Accept: application/vnd.github+json"])
+            .arg("--")
+            .arg(url)
+            .output()
+    })?;
     if !output.status.success() {
         let why = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if why.contains("404") {
@@ -229,15 +280,15 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Could not make a download folder: {e}"))?;
     let zip = dir.join(format!("Pteron-build-{}.zip", release.build));
-    let mut child = curl_command()
-        .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "1800", "-A", UPSTREAM_USER_AGENT, "-o"])
-        .arg(&zip)
-        .arg("--")
-        .arg(&release.url)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Could not start curl: {e}"))?;
+    let mut child = with_curl(|mut command| {
+        command
+            .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "1800", "-A", UPSTREAM_USER_AGENT, "-o"])
+            .arg(&zip)
+            .arg("--")
+            .arg(&release.url)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    })?;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -392,6 +443,13 @@ mod tests {
         assert!(parse_release(&sample("http://github.com/x/y/releases/download/a/Pteron.zip")).is_none());
         assert!(parse_release("not json").is_none());
         assert!(parse_release("{\"tag_name\":\"latest\",\"assets\":[]}").is_none());
+    }
+
+    #[test]
+    fn repository_name_case_does_not_matter() {
+        let url = format!("{}build-35/Pteron-build-35-win64.zip", download_prefix().replace("pteron", "Pteron"));
+        assert!(is_release_url(&url));
+        assert!(!is_release_url("https://evil.example/Sm0r3s-source/pteron/releases/download/x.zip"));
     }
 
     #[test]
