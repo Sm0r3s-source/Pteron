@@ -300,7 +300,7 @@ fn resolve_track(id: &str) -> Result<Value, String> {
 pub(crate) fn command(value: &str) -> String {
     let (verb, arg) = value.split_once(':').unwrap_or((value, ""));
     match verb {
-        "search" => match innertube::search(&clip(arg, 200)) {
+        "search" => match innertube::search(&clip(arg, 200), "") {
             Ok((items, next)) => json!({"items": items_json(&items), "next": next}).to_string(),
             Err(message) => error(&message),
         },

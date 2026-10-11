@@ -39,7 +39,12 @@ enum Client {
     /// The player YouTube embeds in other websites; plays many videos the others refuse.
     WebEmbedded,
     Tv,
+    /// The Oculus Quest YouTube app; another way in when the others get a bot check.
+    AndroidVr,
 }
+
+const ANDROID_VR_VERSION: &str = "1.62.27";
+const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 
 fn context(client: Client) -> Value {
     match client {
@@ -53,6 +58,11 @@ fn context(client: Client) -> Value {
         Client::WebEmbedded => json!({
             "client": {"clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": WEB_VERSION, "hl": "en", "gl": "US"},
             "thirdParty": {"embedUrl": "https://www.reddit.com/"}}),
+        Client::AndroidVr => json!({"client": {
+            "clientName": "ANDROID_VR", "clientVersion": ANDROID_VR_VERSION,
+            "deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32,
+            "userAgent": ANDROID_VR_UA, "osName": "Android", "osVersion": "12L",
+            "hl": "en", "gl": "US"}}),
         Client::Tv => json!({"client": {
             "clientName": "TVHTML5", "clientVersion": TV_VERSION, "userAgent": TV_UA,
             "hl": "en", "gl": "US"}}),
@@ -75,6 +85,7 @@ fn post_with(endpoint: &str, mut body: Value, client: Client, visitor: Option<&s
         Client::Web => ("1", WEB_VERSION, WEB_UA),
         Client::WebEmbedded => ("56", WEB_VERSION, WEB_UA),
         Client::Tv => ("7", TV_VERSION, TV_UA),
+        Client::AndroidVr => ("28", ANDROID_VR_VERSION, ANDROID_VR_UA),
     };
     let mut command = curl_command();
     command
@@ -324,16 +335,19 @@ pub(crate) fn player(video_id: &str) -> Result<PlayerInfo, String> {
     // (made-for-kids, some age or region limits) and are only used when it fails.
     let mut first_error = None;
     let visitor = visitor();
-    for client in [Client::Visionos, Client::WebEmbedded, Client::Tv] {
+    let mut all_errors: Vec<String> = Vec::new();
+    for client in [Client::Visionos, Client::AndroidVr, Client::WebEmbedded, Client::Tv] {
         let body = json!({"videoId": video_id, "contentCheckOk": true, "racyCheckOk": true});
         match post_with("player", body, client, visitor.as_deref()).and_then(|answer| parse_player(&answer)) {
             Ok(info) => return Ok(info),
             Err(message) => {
                 warn!("Pteron: {client:?} could not play {video_id}: {message}");
+                all_errors.push(format!("{client:?}: {}", message.chars().take(120).collect::<String>()));
                 first_error.get_or_insert(message);
             },
         }
     }
+    crate::crashlog::note(&format!("player {video_id}: every client failed: {}", all_errors.join(" | ")));
     Err(first_error.unwrap_or_else(|| "YouTube did not answer.".into()))
 }
 
@@ -346,6 +360,8 @@ pub(crate) struct VideoItem {
     pub channel: String,
     pub duration_secs: Option<u64>,
     pub views: String,
+    /// "3 years ago" style upload age (empty when YouTube did not send one).
+    pub published: String,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -365,6 +381,10 @@ fn item_from_renderer(r: &Value) -> Option<VideoItem> {
         .iter()
         .find_map(|k| r.get(*k).map(text_of).filter(|t| !t.is_empty()))
         .unwrap_or_default();
+    let published = ["publishedTimeText"]
+        .iter()
+        .find_map(|k| r.get(*k).map(text_of).filter(|t| !t.is_empty()))
+        .unwrap_or_default();
     Some(VideoItem {
         id: id.to_string(),
         title: r.get("title").map(text_of).unwrap_or_default(),
@@ -375,6 +395,7 @@ fn item_from_renderer(r: &Value) -> Option<VideoItem> {
             .and_then(|t| parse_clock(&t))
             .or_else(|| r.get("lengthSeconds").and_then(as_u64)),
         views,
+        published,
     })
 }
 
@@ -417,6 +438,7 @@ fn item_from_lockup(r: &Value) -> Option<VideoItem> {
         channel: rows.first().cloned().unwrap_or_default(),
         duration_secs: duration,
         views: rows.get(1).cloned().unwrap_or_default(),
+        published: rows.get(2).cloned().unwrap_or_default(),
     })
 }
 
@@ -459,8 +481,50 @@ pub(crate) fn parse_videos(v: &Value, limit: usize) -> Vec<VideoItem> {
     out
 }
 
-pub(crate) fn search(query: &str) -> Result<(Vec<VideoItem>, Option<String>), String> {
-    let answer = post("search", json!({"query": query}), Client::Web)?;
+/// The `params` value YouTube uses for search filters: a tiny protobuf message, base64 encoded.
+/// `sort`: 0 best match, 1 top rated, 2 newest, 3 most views. `date`: 0 any time, 1 last hour,
+/// 2 today, 3 this week, 4 this month, 5 this year. Only videos are asked for.
+pub(crate) fn search_params(sort: u8, date: u8) -> String {
+    if sort == 0 && date == 0 {
+        return String::new();
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    if sort > 0 {
+        bytes.extend_from_slice(&[0x08, sort]);
+    }
+    let mut inner: Vec<u8> = Vec::new();
+    if date > 0 {
+        inner.extend_from_slice(&[0x08, date]);
+    }
+    inner.extend_from_slice(&[0x10, 0x01]);
+    bytes.push(0x12);
+    bytes.push(inner.len() as u8);
+    bytes.extend_from_slice(&inner);
+    base64_std(&bytes)
+}
+
+fn base64_std(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+pub(crate) fn search(query: &str, params: &str) -> Result<(Vec<VideoItem>, Option<String>), String> {
+    let body = if params.is_empty() {
+        json!({"query": query})
+    } else {
+        json!({"query": query, "params": params})
+    };
+    let answer = post("search", body, Client::Web)?;
     Ok((parse_videos(&answer, 40), continuation_token(&answer)))
 }
 

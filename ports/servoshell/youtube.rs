@@ -36,10 +36,18 @@ const FRAGMENT_DIRECT: &str = "pteron-direct";
 pub(crate) enum Request {
     /// A video, by id.
     Video(String),
-    /// Search results for a text.
-    Search(String),
+    /// Search results for a text, with how to sort and which upload dates to show.
+    Search(String, Filter),
     /// The videos of a channel, by its path on youtube.com (`/@name`, `/channel/ID`, ...).
     Channel(String),
+}
+
+/// Search filter: sort 0 best match, 1 top rated, 2 newest, 3 most views; date 0 any time,
+/// 2 today, 3 this week, 4 this month, 5 this year.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub(crate) struct Filter {
+    pub sort: u8,
+    pub date: u8,
 }
 
 impl Request {
@@ -47,7 +55,8 @@ impl Request {
     fn key(&self) -> String {
         match self {
             Request::Video(id) => id.clone(),
-            Request::Search(query) => format!("s-{:016x}", fnv(query)),
+            Request::Search(query, f) if *f == Filter::default() => format!("s-{:016x}", fnv(query)),
+            Request::Search(query, f) => format!("s-{:016x}", fnv(&format!("{query}\u{1}{}\u{1}{}", f.sort, f.date))),
             Request::Channel(path) => format!("c-{:016x}", fnv(path)),
         }
     }
@@ -154,10 +163,18 @@ pub(crate) fn classify(url: &Url) -> Option<Action> {
                     .query_pairs()
                     .find(|(key, _)| key == "search_query")
                     .map(|(_, value)| clean_query(&value))?;
+                let number = |name: &str, max: u8| {
+                    url.query_pairs()
+                        .find(|(key, _)| key == name)
+                        .and_then(|(_, value)| value.parse::<u8>().ok())
+                        .filter(|n| *n <= max)
+                        .unwrap_or(0)
+                };
+                let filter = Filter { sort: number("sort", 3), date: number("date", 5) };
                 return if query.is_empty() {
                     Some(Action::Home)
                 } else {
-                    Some(Action::Open(Request::Search(query)))
+                    Some(Action::Open(Request::Search(query, filter)))
                 };
             }
             if path == "/playlist" &&
@@ -329,6 +346,11 @@ a.vid{color:var(--fg);text-decoration:none;display:block}
 .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.8);color:#fff;font-size:12px;padding:1px 6px;border-radius:5px}
 .vt{font-weight:600;font-size:14px;margin:7px 0 2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .vm{color:var(--mut);font-size:13px}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px}
+.bl{color:var(--mut);font-size:13px;min-width:70px}
+.chip{font:inherit;font-size:13px;padding:5px 13px;border-radius:999px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none}
+.chip:hover{border-color:var(--gold)}
+.chip.on{background:var(--gold);color:#1a1a1a;border-color:var(--gold)}
 .next a.vid{display:flex;gap:10px;margin-bottom:12px}
 .next .thumb{width:158px;flex:none}
 .next .vt{margin-top:0;font-size:13.5px}
@@ -455,10 +477,16 @@ fn watch_url(id: &str) -> String {
 fn real_url(request: &Request) -> String {
     match request {
         Request::Video(id) => watch_url(id),
-        Request::Search(query) => format!(
-            "https://www.youtube.com/results?search_query={}",
-            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
-        ),
+        Request::Search(query, f) => {
+            let mut link = format!(
+                "https://www.youtube.com/results?search_query={}",
+                url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
+            );
+            if *f != Filter::default() {
+                link.push_str(&format!("&sort={}&date={}", f.sort, f.date));
+            }
+            link
+        },
         Request::Channel(path) => format!("https://www.youtube.com{path}"),
     }
 }
@@ -524,6 +552,60 @@ fn format_views(views: u64) -> String {
     }
 }
 
+/// How many hours ago an upload was, from YouTube's "3 years ago" / "Streamed 2 days ago" text.
+fn age_hours(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let mut words = lower.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        if let Ok(n) = word.parse::<u64>() {
+            let unit = words.peek()?.trim_end_matches('s');
+            let hours = match unit {
+                "second" | "minute" => 0,
+                "hour" => 1,
+                "day" => 24,
+                "week" => 24 * 7,
+                "month" => 24 * 30,
+                "year" => 24 * 365,
+                _ => continue,
+            };
+            return Some(n * hours);
+        }
+    }
+    None
+}
+
+/// Upload filter and sort bar for search results.
+fn filter_bar(query: &str, current: Filter) -> String {
+    let link = |label: &str, f: Filter| {
+        let request = Request::Search(query.to_string(), f);
+        let on = if f == current { " on" } else { "" };
+        format!("<a class=\"chip{on}\" href=\"{}\">{label}</a>", esc(&real_url(&request)))
+    };
+    let sorts = [("Best match", 0), ("Newest", 2), ("Most views", 3), ("Top rated", 1)]
+        .iter()
+        .map(|(label, sort)| link(label, Filter { sort: *sort, date: current.date }))
+        .collect::<String>();
+    let dates = [("Any time", 0), ("Today", 2), ("This week", 3), ("This month", 4), ("This year", 5)]
+        .iter()
+        .map(|(label, date)| link(label, Filter { sort: current.sort, date: *date }))
+        .collect::<String>();
+    format!(
+        "<div class=\"bar\"><span class=\"bl\">Sort</span>{sorts}\
+         <button class=\"chip\" id=\"old\" type=\"button\">Oldest first</button></div>\
+         <div class=\"bar\"><span class=\"bl\">Uploaded</span>{dates}</div>\
+         <script>(function(){{var b=document.getElementById('old'),g=document.getElementById('g');if(!b||!g)return;\
+         var on=false,busy=false,orig=null;\
+         function apply(){{if(busy)return;busy=true;var k=[].slice.call(g.children);\
+         if(!orig)orig=k.slice();\
+         if(on){{k.sort(function(x,y){{var a=+x.getAttribute('data-a'),c=+y.getAttribute('data-a');\
+         if(a<0&&c<0)return 0;if(a<0)return 1;if(c<0)return -1;return c-a;}});}}\
+         else{{k.sort(function(x,y){{var i=orig.indexOf(x),j=orig.indexOf(y);return (i<0?1e9:i)-(j<0?1e9:j);}});}}\
+         k.forEach(function(e){{g.appendChild(e);}});busy=false;}}\
+         b.onclick=function(){{on=!on;b.className=on?'chip on':'chip';apply();}};\
+         if(window.MutationObserver)new MutationObserver(function(m){{if(!busy&&on)apply();}}).observe(g,{{childList:true}});}})();</script>"
+    )
+}
+
 fn card(item: &VideoItem) -> String {
     let title = if item.title.is_empty() { "(no title)" } else { item.title.as_str() };
     let mut meta = Vec::new();
@@ -533,12 +615,16 @@ fn card(item: &VideoItem) -> String {
     if !item.views.is_empty() {
         meta.push(esc(&item.views));
     }
+    if !item.published.is_empty() {
+        meta.push(esc(&item.published));
+    }
+    let age = age_hours(&item.published).map(|h| h.to_string()).unwrap_or_else(|| "-1".into());
     let duration = item
         .duration_secs
         .map(|d| format!("<span class=\"dur\">{}</span>", format_duration(d)))
         .unwrap_or_default();
     format!(
-        "<a class=\"vid\" href=\"{}\"><div class=\"thumb\"><img \
+        "<a class=\"vid\" data-a=\"{age}\" href=\"{}\"><div class=\"thumb\"><img \
          data-src=\"https://i.ytimg.com/vi/{}/mqdefault.jpg\" alt=\"\">{duration}</div>\
          <div><div class=\"vt\">{}</div><div class=\"vm\">{}</div></div></a>",
         esc(&watch_url(&item.id)),
@@ -644,13 +730,17 @@ fn channel_html(request: &Request, channel: &innertube::Channel) -> String {
 /// Search results or a channel's videos.
 fn results_html(request: &Request, heading: &str, items: &[VideoItem], next: Option<&str>) -> String {
     let query = match request {
-        Request::Search(query) => query.as_str(),
+        Request::Search(query, _) => query.as_str(),
         _ => "",
+    };
+    let bar = match request {
+        Request::Search(query, f) => filter_bar(query, *f),
+        _ => String::new(),
     };
     let cards: String = items.iter().map(card).collect();
     let body = if items.is_empty() {
         format!(
-            "<h1>{}</h1><div class=\"card\"><p>Nothing found.</p></div><p>{}</p>",
+            "<h1>{}</h1>{bar}<div class=\"card\"><p>Nothing found.</p></div><p>{}</p>",
             esc(heading),
             direct_link(request)
         )
@@ -659,7 +749,7 @@ fn results_html(request: &Request, heading: &str, items: &[VideoItem], next: Opt
             (Some(token), Some(proxy)) => more_block(token, &proxy.search_more_url()),
             _ => String::new(),
         };
-        format!("<h1>{}</h1><div class=\"grid\" id=\"g\">{cards}</div>{more}", esc(heading))
+        format!("<h1>{}</h1>{bar}<div class=\"grid\" id=\"g\">{cards}</div>{more}", esc(heading))
     };
     page_with(heading, query, false, &body, false)
 }
@@ -968,7 +1058,7 @@ fn fetch(request: &Request) {
     let key = request.key();
     let html = match request {
         Request::Video(id) => video_page(id),
-        Request::Search(query) => match innertube::search(query) {
+        Request::Search(query, f) => match innertube::search(query, &innertube::search_params(f.sort, f.date)) {
             Ok((items, next)) => results_html(request, &format!("Results for \"{query}\""), &items, next.as_deref()),
             Err(message) => error_html(request, &message),
         },
@@ -1072,7 +1162,7 @@ pub(crate) fn handle(action: Action) -> Option<Url> {
         Action::Open(request) => {
             let message = match request {
                 Request::Video(_) => "Getting the video...",
-                Request::Search(_) => "Searching YouTube...",
+                Request::Search(..) => "Searching YouTube...",
                 Request::Channel(_) => "Loading the channel...",
             };
             start(request, message)
@@ -1093,6 +1183,23 @@ mod tests {
     }
 
     #[test]
+    fn search_filters() {
+        assert_eq!(innertube::search_params(0, 0), "");
+        assert_eq!(innertube::search_params(3, 0), "CAMSAhAB");
+        assert_eq!(innertube::search_params(2, 3), "CAISBAgDEAE=");
+        assert_eq!(age_hours("3 years ago"), Some(3 * 8760));
+        assert_eq!(age_hours("Streamed 2 days ago"), Some(48));
+        assert_eq!(age_hours("5 minutes ago"), Some(0));
+        assert_eq!(age_hours("1.5M views"), None);
+        assert_eq!(age_hours(""), None);
+        assert_eq!(
+            watch("https://www.youtube.com/results?search_query=x&sort=3&date=9"),
+            Some(Action::Open(Request::Search("x".into(), Filter { sort: 3, date: 0 })))
+        );
+        assert!(real_url(&Request::Search("x".into(), Filter { sort: 2, date: 4 })).ends_with("&sort=2&date=4"));
+    }
+
+    #[test]
     fn classifies_links() {
         assert_eq!(watch("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=5"), video("dQw4w9WgXcQ"));
         assert_eq!(watch("https://youtu.be/dQw4w9WgXcQ?si=x"), video("dQw4w9WgXcQ"));
@@ -1101,7 +1208,7 @@ mod tests {
         assert_eq!(watch("https://www.youtube.com/feed/trending"), Some(Action::Home));
         assert_eq!(
             watch("https://www.youtube.com/results?search_query=8+bit+ryan"),
-            Some(Action::Open(Request::Search("8 bit ryan".into())))
+            Some(Action::Open(Request::Search("8 bit ryan".into(), Filter::default())))
         );
         assert_eq!(watch("https://www.youtube.com/results?search_query="), Some(Action::Home));
         assert_eq!(
@@ -1149,9 +1256,10 @@ mod tests {
 
     #[test]
     fn keys_are_stable_and_safe() {
-        let a = Request::Search("hello world".into()).key();
-        assert_eq!(a, Request::Search("hello world".into()).key());
-        assert_ne!(a, Request::Search("hello worlds".into()).key());
+        let a = Request::Search("hello world".into(), Filter::default()).key();
+        assert_eq!(a, Request::Search("hello world".into(), Filter::default()).key());
+        assert_ne!(a, Request::Search("hello worlds".into(), Filter::default()).key());
+        assert_ne!(a, Request::Search("hello world".into(), Filter { sort: 2, date: 0 }).key());
         assert!(valid_key(&a));
         assert!(valid_key(&Request::Channel("/@x".into()).key()));
     }
@@ -1202,7 +1310,7 @@ mod tests {
             banner: "https://yt3.googleusercontent.com/b".into(),
             subscribers: "2.1M subscribers".into(),
             description: "Hi https://example.com/x".into(),
-            videos: vec![VideoItem { id: "dQw4w9WgXcQ".into(), title: "T".into(), channel: String::new(), duration_secs: None, views: String::new() }],
+            videos: vec![VideoItem { id: "dQw4w9WgXcQ".into(), title: "T".into(), channel: String::new(), duration_secs: None, views: String::new(), published: String::new() }],
             next: Some("TOKEN%3D".into()),
         };
         let html = channel_html(&Request::Channel("/@x".into()), &channel);
@@ -1261,13 +1369,15 @@ mod tests {
     #[test]
     fn results_page() {
         let items = vec![
-            VideoItem { id: "dQw4w9WgXcQ".into(), title: "A <b>song</b>".into(), channel: "Chan".into(), duration_secs: Some(212), views: "1.5M views".into() },
-            VideoItem { id: "aaaaaaaaaaa".into(), title: String::new(), channel: String::new(), duration_secs: None, views: String::new() },
+            VideoItem { id: "dQw4w9WgXcQ".into(), title: "A <b>song</b>".into(), channel: "Chan".into(), duration_secs: Some(212), views: "1.5M views".into(), published: "3 years ago".into() },
+            VideoItem { id: "aaaaaaaaaaa".into(), title: String::new(), channel: String::new(), duration_secs: None, views: String::new(), published: String::new() },
         ];
-        let html = results_html(&Request::Search("8 bit \"ryan\"".into()), "Results", &items, None);
+        let html = results_html(&Request::Search("8 bit \"ryan\"".into(), Filter::default()), "Results", &items, None);
         assert!(html.contains("watch?v=dQw4w9WgXcQ"));
         assert!(html.contains("3:32"));
         assert!(html.contains("1.5M views"));
+        assert!(html.contains("3 years ago") && html.contains("data-a=\"26280\""));
+        assert!(html.contains("Most views") && html.contains("sort=3&amp;date=0"));
         assert!(html.contains("A &lt;b&gt;song"));
         assert!(html.contains("(no title)"));
         assert!(html.contains("value=\"8 bit &quot;ryan&quot;\""));
