@@ -673,6 +673,11 @@ impl Gui {
                                 crate::downloads::open_in_default_browser(url.as_str());
                             }
                         },
+                        sidebar::Action::CheckPage(index) => {
+                            if let Some(webview) = ids.get(index).and_then(|id| window.webview_by_id(*id)) {
+                                webview.evaluate_javascript(crate::sitecheck::REPORT_JS, |_| {});
+                            }
+                        },
                         sidebar::Action::TogglePin(index) => {
                             if let Some(id) = ids.get(index) {
                                 window.queue_user_interface_command(

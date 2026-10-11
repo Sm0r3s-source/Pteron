@@ -35,6 +35,7 @@ mod reader;
 mod report;
 mod passwords;
 mod secure;
+mod sitecheck;
 mod sync;
 mod updater;
 mod youtube;

@@ -1018,6 +1018,10 @@ impl WebViewDelegate for RunningAppState {
         if crate::passwords::handle_console(webview.url().as_ref(), &message) {
             return;
         }
+        // Pteron: the "Check this page" report.
+        if crate::sitecheck::handle_console(&message) {
+            return;
+        }
         self.platform_window_for_webview(&webview)
             .show_console_message(level, &message);
     }

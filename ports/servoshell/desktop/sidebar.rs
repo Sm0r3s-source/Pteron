@@ -89,6 +89,7 @@ pub(crate) enum Action {
     TogglePin(usize),
     /// Open this tab's page in the computer's default browser.
     OpenExternal(usize),
+    CheckPage(usize),
     TogglePinSleeping(usize),
     ToggleBookmark,
     /// Show the page in reading mode.
@@ -922,6 +923,10 @@ fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Acti
         }
         if ui.button("Open in default browser").clicked() {
             actions.push(Action::OpenExternal(index));
+            ui.close();
+        }
+        if ui.button("Check this page").on_hover_text("Find out why a page is blank or broken").clicked() {
+            actions.push(Action::CheckPage(index));
             ui.close();
         }
         if ui.button("Close tab").clicked() {
