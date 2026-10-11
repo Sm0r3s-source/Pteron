@@ -782,6 +782,58 @@ fn privacy_section(
     );
     card(
         ui,
+        "Passwords",
+        Some(
+            "Pteron asks before saving a login, and fills it only when you click. Saved passwords \
+             are locked with your Windows account, kept only on this computer, and never synced.",
+        ),
+        "passwords logins saved autofill sign in remember",
+        |ui| {
+            let mut on = crate::passwords::enabled();
+            if ui.checkbox(&mut on, "Offer to save passwords").changed() {
+                crate::passwords::set_enabled(on);
+            }
+            let logins = crate::passwords::list();
+            ui.add_space(6.0);
+            if logins.is_empty() {
+                ui.label("No saved logins yet.");
+            }
+            let mut remove = None;
+            for (index, (site, user)) in logins.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(if user.is_empty() { site.clone() } else { format!("{site} - {user}") });
+                    if ui.small_button("Delete").clicked() {
+                        remove = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = remove {
+                crate::passwords::delete(index);
+            }
+            if logins.len() > 1 && ui.button("Delete all saved logins").clicked() {
+                crate::passwords::delete_all();
+            }
+            let never = crate::passwords::never_list();
+            if !never.is_empty() {
+                ui.add_space(8.0);
+                ui.label("Never ask on:");
+                let mut allow = None;
+                for (index, site) in never.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(site);
+                        if ui.small_button("Ask again").clicked() {
+                            allow = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = allow {
+                    crate::passwords::allow_again(index);
+                }
+            }
+        },
+    );
+    card(
+        ui,
         "Sync between computers",
         Some(
             "Keeps your bookmarks and settings the same on two computers through a folder that \

@@ -1013,6 +1013,11 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn show_console_message(&self, webview: WebView, level: ConsoleLogLevel, message: String) {
+        // Pteron: login-form messages from our own page script; never logged (they can hold
+        // a password).
+        if crate::passwords::handle_console(webview.url().as_ref(), &message) {
+            return;
+        }
         self.platform_window_for_webview(&webview)
             .show_console_message(level, &message);
     }

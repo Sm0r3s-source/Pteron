@@ -1092,6 +1092,7 @@ impl Gui {
             // Pteron: find in page (Ctrl+F).
             Self::show_find_bar(ctx, window);
             Self::show_zoom_hud(ctx);
+            Self::show_password_bars(ctx, window);
 
             // Pteron: short messages from reading mode.
             if let Some(text) = crate::reader::message() {
@@ -1175,6 +1176,80 @@ impl Gui {
 
     /// Paint the GUI, as of the last update.
     /// Pteron: the find-in-page bar, top right over the page.
+    /// Pteron: the "Save password?" and "Fill saved login" bars (bottom right over the page).
+    fn show_password_bars(ctx: &egui::Context, window: &ServoShellWindow) {
+        use std::time::Duration;
+        if crate::passwords::working() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        let active = window.active_webview();
+        let page = active.as_ref().and_then(|webview| webview.url());
+        if let (Some(webview), Some(page)) = (&active, &page) &&
+            let Some(script) = crate::passwords::take_fill_script(page)
+        {
+            webview.evaluate_javascript(script, |_| {});
+        }
+        let place = |id: &'static str| {
+            egui::Area::new(Id::new(id))
+                .order(Order::Tooltip)
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -176.0))
+        };
+        if let Some((host, user, replaces)) = crate::passwords::save_prompt() {
+            let (mut save, mut later, mut never) = (false, false, false);
+            place("pteron_save_password").show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let who = if user.is_empty() { host.clone() } else { format!("{user} on {host}") };
+                    ui.label(if replaces {
+                        format!("Update the saved password for {who}?")
+                    } else {
+                        format!("Save the password for {who}?")
+                    });
+                    ui.horizontal(|ui| {
+                        save = ui.button(if replaces { "Update" } else { "Save" }).clicked();
+                        later = ui.button("Not now").clicked();
+                        never = ui.button("Never for this site").clicked();
+                    });
+                });
+            });
+            if save {
+                crate::passwords::accept_save();
+            } else if never {
+                crate::passwords::dismiss_save(true);
+            } else if later {
+                crate::passwords::dismiss_save(false);
+            }
+            ctx.request_repaint_after(Duration::from_millis(500));
+        } else if let Some(page) = &page &&
+            let Some((host, users)) = crate::passwords::fill_offer(page)
+        {
+            let (mut chosen, mut close) = (None, false);
+            place("pteron_fill_password").show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(format!("Saved login for {host}"));
+                    for (index, user) in users.iter().enumerate().take(5) {
+                        let label = if user.is_empty() { "Fill saved login".to_string() } else { format!("Fill as {user}") };
+                        if ui.button(label).clicked() {
+                            chosen = Some(index);
+                        }
+                    }
+                    close = ui.button("Not now").clicked();
+                });
+            });
+            if let Some(index) = chosen {
+                crate::passwords::request_fill(index);
+            } else if close {
+                crate::passwords::dismiss_offer();
+            }
+        } else if let Some(text) = crate::passwords::message() {
+            place("pteron_password_message").show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(text);
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
+
     /// Pteron: the zoom level, shown for a moment after a zoom shortcut.
     fn show_zoom_hud(ctx: &egui::Context) {
         let Some(percent) = crate::find::zoom_percent() else { return };

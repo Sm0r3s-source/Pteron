@@ -32,6 +32,7 @@ mod find;
 mod music;
 mod reader;
 mod report;
+mod passwords;
 mod secure;
 mod sync;
 mod updater;
