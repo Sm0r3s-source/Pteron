@@ -26,6 +26,7 @@ mod downloads;
 mod library;
 mod pteron;
 mod innertube;
+mod mp3;
 mod mp4mux;
 mod streamproxy;
 mod find;

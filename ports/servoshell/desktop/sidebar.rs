@@ -775,6 +775,14 @@ fn downloads_section(ui: &mut egui::Ui) {
                         downloads::cancel(item.id);
                     }
                 },
+                State::Converting(percent) => {
+                    ui.add(egui::ProgressBar::new(*percent as f32 / 100.0).desired_height(8.0));
+                    ui.label(RichText::new(format!("Making the MP3... {percent}%")).small().weak());
+                    if ui.small_button("Cancel").clicked() {
+                        downloads::cancel(item.id);
+                    }
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                },
                 State::Done => {
                     ui.label(
                         RichText::new(format!("Done, {}", downloads::format_bytes(item.received)))

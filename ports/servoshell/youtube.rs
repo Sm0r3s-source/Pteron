@@ -412,6 +412,17 @@ pub(crate) fn player_memory(value: &str) -> String {
         crate::crashlog::note(&format!("player: {note}"));
         return String::new();
     }
+    if let Some(rest) = value.strip_prefix("dl:") {
+        // dl:<video|audio>|<file address>|<title>|<channel>
+        let mut parts = rest.splitn(4, '|');
+        let (kind, url, title, channel) =
+            (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        let ok = streamproxy::global().is_some_and(|p| p.is_media_url(url)) && matches!(kind, "video" | "audio");
+        if ok {
+            crate::downloads::begin_media(url, title, &clean(channel, 120), kind == "audio");
+        }
+        return if ok { "1" } else { "0" }.into();
+    }
     if value.starts_with("later:") || value.starts_with("hist:") || value.starts_with("pos:") || value.starts_with("clear:") {
         return store_command(value);
     }
@@ -1158,6 +1169,16 @@ var wl=document.getElementById('wl');
 function wlPaint(on){wl.textContent=on?'Saved \u2713':'Watch later';}
 wl.onclick=function(){mem('later:'+JSON.stringify(VID),function(r){wlPaint(r==='1');});};
 mem('later:has:'+VID.id,function(r){wlPaint(r==='1');});
+function dlButton(id,kind,url){
+  var b=document.getElementById(id),old=b.textContent;
+  b.onclick=function(){
+    var u=url();if(!u)return;
+    mem('dl:'+kind+'|'+u+'|'+VID.title.replace(/\|/g,' ')+'|'+(VID.channel||'').replace(/\|/g,' '),function(r){
+      b.textContent=r==='1'?'Started \u2713':'Could not start';
+      setTimeout(function(){b.textContent=old;},2500);});};
+}
+dlButton('dv','video',function(){return q.value;});
+dlButton('da','audio',function(){return AUDIO;});
 var rs=document.getElementById('rs'),rsb=document.getElementById('rsb');
 mem('pos:get:'+VID.id,function(r){var s=parseInt(r,10);
   if(s>=15&&(!VID.duration||s<VID.duration-20)){rs.style.display='flex';rsb.textContent='Resume from '+clock(s);
@@ -1262,8 +1283,10 @@ fn player_html(id: &str, info: &innertube::PlayerInfo, choices: &[Choice], relat
     }))
     .unwrap_or_else(|_| "{}".into())
     .replace('<', "\\u003c");
+    let audio_url = choices[start].url.rsplit_once('/').map(|(base, _)| format!("{base}/0.mp4")).unwrap_or_default();
     let script = format!(
-        "var VID={vid};{}",
+        "var VID={vid};var AUDIO='{}';{}",
+        esc(&audio_url),
         PLAYER_JS.replace("@FULL@", &full_endpoint).replace("@MEM@", &memory_endpoint)
     );
     let comments_endpoint = streamproxy::global().map(|p| p.comments_url()).unwrap_or_default();
@@ -1287,6 +1310,8 @@ fn player_html(id: &str, info: &innertube::PlayerInfo, choices: &[Choice], relat
          <div id=\"rs\" style=\"display:none\"><button type=\"button\" id=\"rsb\" class=\"qbtn\"></button><button type=\"button\" id=\"rso\" class=\"qbtn\">Start over</button></div>\
          <h1>{}</h1>\
          <div class=\"row\">{author}<span class=\"meta\">{}</span><span class=\"sp\"></span>\
+         <button type=\"button\" id=\"dv\" class=\"qbtn\" title=\"Save this video (.mp4) to your Downloads folder\">Download video</button>\
+         <button type=\"button\" id=\"da\" class=\"qbtn\" title=\"Save only the sound as an MP3 in your Downloads folder\">Download MP3</button>\
          <button type=\"button\" id=\"wl\" class=\"qbtn\">Watch later</button><button type=\"button\" id=\"th\" class=\"qbtn\">Theater</button>\
          <div class=\"pick qwrap\"><span id=\"res\" class=\"meta\"></span><span>Speed</span><button type=\"button\" id=\"sb\" class=\"qbtn\"></button>\
          <div id=\"sm\" class=\"qmenu\" style=\"display:none\"></div>\

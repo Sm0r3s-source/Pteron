@@ -50,6 +50,8 @@ pub(crate) enum State {
     /// A program or script: waiting for the user to confirm.
     Confirm,
     Running,
+    /// Turning the downloaded sound into an MP3 (percent done).
+    Converting(u8),
     Done,
     Failed(String),
     Cancelled,
@@ -67,6 +69,8 @@ pub(crate) struct Item {
     pub total: Option<u64>,
     pub received: u64,
     pub dangerous: bool,
+    /// Set for a song saved as MP3: the downloaded sound is converted when it has arrived.
+    pub convert: Option<crate::mp3::Tags>,
 }
 
 struct Entry {
@@ -210,7 +214,26 @@ fn update(id: u64, f: impl FnOnce(&mut Item)) {
 
 /// Called when the user followed a link to a file.
 pub(crate) fn begin(url: &Url) {
-    let name = file_name_from_url(url);
+    begin_named(url.as_str(), file_name_from_url(url), None);
+}
+
+/// The file name for a video or song saved from Plume: the title, with `.mp4` (video) or
+/// `.mp3` (sound only).
+pub(crate) fn media_file_name(title: &str, audio: bool) -> String {
+    let stem = sanitize_file_name(&title.chars().filter(|c| !c.is_control()).take(100).collect::<String>());
+    let stem = stem.trim_end_matches(|c: char| c == '.' || c == ' ');
+    let stem = if stem.is_empty() { "video" } else { stem };
+    format!("{stem}.{}", if audio { "mp3" } else { "mp4" })
+}
+
+/// Called when the user pressed a download button on a Plume page. The address must be one of
+/// the local video helper's.
+pub(crate) fn begin_media(url: &str, title: &str, artist: &str, audio: bool) {
+    let convert = audio.then(|| crate::mp3::Tags { title: title.to_string(), artist: artist.to_string() });
+    begin_named(url, media_file_name(title, audio), convert);
+}
+
+fn begin_named(url: &str, name: String, convert: Option<crate::mp3::Tags>) {
     let dir = download_dir();
     if let Err(error) = std::fs::create_dir_all(&dir) {
         set_notice(format!("Cannot create the Downloads folder: {error}"));
@@ -231,6 +254,7 @@ pub(crate) fn begin(url: &Url) {
         total: None,
         received: 0,
         dangerous,
+        convert,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     LIST.lock().unwrap().push(Entry {
@@ -286,7 +310,7 @@ pub(crate) fn cancel(id: u64) {
 pub(crate) fn remove(id: u64) {
     let mut list = LIST.lock().unwrap();
     if let Some(index) = list.iter().position(|e| e.item.id == id) {
-        let running = list[index].item.state == State::Running;
+        let running = matches!(list[index].item.state, State::Running | State::Converting(_));
         if running {
             list[index].cancel.store(true, Ordering::Relaxed);
         }
@@ -303,7 +327,7 @@ pub(crate) fn any_active() -> bool {
     LIST.lock()
         .unwrap()
         .iter()
-        .any(|e| e.item.state == State::Running)
+        .any(|e| matches!(e.item.state, State::Running | State::Converting(_)))
 }
 
 /// Whether anything is waiting for a confirmation.
@@ -532,6 +556,57 @@ fn run(id: u64, url: String, part: PathBuf, cancel: Arc<AtomicBool>) {
         }
     };
 
+    if status.success() &&
+        let Some(tags) = LIST
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.item.id == id)
+            .and_then(|e| e.item.convert.clone())
+    {
+        // A song saved as MP3: the sound that just arrived is converted.
+        let name = LIST
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.item.id == id)
+            .map(|e| e.item.name.clone())
+            .unwrap_or_else(|| "song.mp3".into());
+        let final_path = unique_path(&download_dir(), &name);
+        let mut temp = final_path.clone().into_os_string();
+        temp.push(".convert");
+        let temp = PathBuf::from(temp);
+        update(id, |item| item.state = State::Converting(0));
+        let result = crate::mp3::m4a_to_mp3(&part, &temp, &tags, &cancel, &mut |fraction| {
+            update(id, |item| item.state = State::Converting((fraction * 100.0) as u8));
+        });
+        let _ = std::fs::remove_file(&part);
+        match result {
+            Ok(()) => match std::fs::rename(&temp, &final_path) {
+                Ok(()) => {
+                    let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+                    update(id, |item| {
+                        item.path = final_path;
+                        item.received = size;
+                        item.total = Some(size);
+                        item.state = State::Done;
+                    });
+                    set_notice(format!("Downloaded {name}"));
+                },
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temp);
+                    update(id, |item| item.state = State::Failed(format!("Could not save the file: {error}")));
+                },
+            },
+            Err(message) => {
+                let _ = std::fs::remove_file(&temp);
+                update(id, |item| {
+                    item.state = if cancel.load(Ordering::Relaxed) { State::Cancelled } else { State::Failed(message) }
+                });
+            },
+        }
+        return;
+    }
     if status.success() {
         let name = LIST
             .lock()
@@ -579,6 +654,14 @@ fn run(id: u64, url: String, part: PathBuf, cancel: Arc<AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_names() {
+        assert_eq!(media_file_name("A/B: song?", true), "A_B_ song_.mp3");
+        assert_eq!(media_file_name("  ...  ", false), "download.mp4");
+        assert_eq!(media_file_name("CON", false), "_CON.mp4");
+        assert!(media_file_name(&"x".repeat(300), false).chars().count() <= 104);
+    }
 
     #[test]
     fn detects_download_links() {

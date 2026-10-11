@@ -277,6 +277,13 @@ impl Proxy {
         format!("http://127.0.0.1:{}/u/{}", self.port, self.state.lock().unwrap().suggest_token)
     }
 
+    /// Whether this is an address of the helper's video files (the only thing a Plume download
+    /// button may save).
+    pub(crate) fn is_media_url(&self, url: &str) -> bool {
+        let base = format!("http://127.0.0.1:{}", self.port);
+        url.strip_prefix(&base).is_some_and(|path| !path.contains('?') && parse_path(path).is_some())
+    }
+
     pub(crate) fn url(&self, token: &str, itag: u32) -> String {
         format!("http://127.0.0.1:{}/v/{token}/{itag}.mp4", self.port)
     }

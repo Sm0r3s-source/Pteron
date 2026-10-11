@@ -646,7 +646,7 @@ pub(crate) fn known_issues_html() -> String {
 <li>Very long tracks (mixes over about 20 minutes) take longer to start.</li>\
 <li>Music keeps playing while you use other tabs, but only while the Music tab stays open.</li></ul></div>\
 <div class=card><h2>The browser</h2><ul>\
-<li>Windows only for now. No extensions and no private window. Saved passwords work on ordinary login forms; some sites with unusual forms may not offer to save, and there is no import from other browsers yet. The ad blocker only covers well-known ad and tracker networks (turn it off in Settings if a page looks broken).</li>\
+<li>Windows only for now. No extensions and no private window. Downloads (the buttons in Plume and Plume Music) save .mp4 video and .mp3 audio. Saved passwords work on ordinary login forms; some sites with unusual forms may not offer to save, and there is no import from other browsers yet. The ad blocker only covers well-known ad and tracker networks (turn it off in Settings if a page looks broken).</li>\
 <li>The installer is not signed yet, so Windows shows a &quot;protected your PC&quot; warning. Choose <b>More info</b>, then <b>Run anyway</b>.</li>\
 <li>The memory savings have not been measured against other browsers yet.</li></ul></div>\
 <p>Something not on this list? <b>Settings &rarr; About &rarr; Report a problem</b>.</p>",

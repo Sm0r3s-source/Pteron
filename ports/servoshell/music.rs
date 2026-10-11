@@ -463,6 +463,18 @@ pub(crate) fn command(value: &str) -> String {
             Err(_) => error("bad number"),
         },
         "clear" => with_queue(|q| q.clear(), true).1.to_string(),
+        "dl" => {
+            let v: Value = serde_json::from_str(arg).unwrap_or(Value::Null);
+            let url = v.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let title = clip(v.get("title").and_then(|t| t.as_str()).unwrap_or(""), 100);
+            if streamproxy::global().is_some_and(|p| p.is_media_url(url)) {
+                let channel = clip(v.get("channel").and_then(|t| t.as_str()).unwrap_or(""), 120);
+                crate::downloads::begin_media(url, &title, &channel, true);
+                json!({"ok": true}).to_string()
+            } else {
+                error("bad file")
+            }
+        },
         "shuffle" => with_queue(|q| q.shuffle(time_seed()), true).1.to_string(),
         "lib" => with_library(|_| (), false).1.to_string(),
         "like" => match serde_json::from_str::<Value>(arg).ok().as_ref().and_then(Track::from_value) {
@@ -610,6 +622,10 @@ function api(cmd,arg,cb){var x=new XMLHttpRequest();x.open('GET',U+'?x='+encodeU
 function setQ(st){if(st&&st.tracks){Q=st;renderQ();}}
 function setLib(d){if(d&&d.liked){Lib=d;LK={};d.liked.forEach(function(t){LK[t.id]=1;});paintHearts();}}
 function paintHearts(){var all=document.querySelectorAll('[data-h]');for(var i=0;i<all.length;i++){var b=all[i],on=!!LK[b.getAttribute('data-h')];b.textContent=on?'♥':'♡';b.className=on?'ib liked':'ib';b.title=on?'Remove from liked songs':'Add to liked songs';}}
+function dlbtn(t){var b=el('button','ib','\u2B07');b.title='Download this song as an MP3';b.onclick=function(e){e.stopPropagation();
+  say('Getting '+t.title+' ready to download...');
+  resolve(t.id,function(d,err){if(!d){say('Could not download'+(err?' ('+err+')':'')+'.');return;}
+    api('dl',JSON.stringify({url:d.url,title:t.title,channel:t.channel}),function(r){say(r&&r.ok?'Downloading '+t.title+' - see the sidebar.':'Could not start the download.');});});};return b;}
 function heart(t){var b=el('button','ib','♡');b.setAttribute('data-h',t.id);b.onclick=function(e){e.stopPropagation();api('like',JSON.stringify(t),function(d){setLib(d);});};return b;}
 function say(m){var s=$('msg');s.textContent=m||'';}
 function renderQ(){
@@ -622,7 +638,7 @@ function renderQ(){
     tt.onclick=function(){play(i);};
     r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
     var x=el('button','ib','×');x.title='Remove';x.onclick=function(){api('rm',i,function(st){setQ(st);});};
-    r.appendChild(heart(t));r.appendChild(x);box.appendChild(r);
+    r.appendChild(heart(t));r.appendChild(dlbtn(t));r.appendChild(x);box.appendChild(r);
   });
   paintHearts();
   $('rep').textContent='Repeat: '+['off','all','one'][Q.repeat||0];
@@ -650,7 +666,7 @@ function renderList(items,heading,listId,append){
     r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
     var p=el('button','ib','▶');p.title='Play now';p.onclick=function(){playNow(t);};
     var a=el('button','ib','+');a.title='Add to queue';a.onclick=function(){api('add',JSON.stringify(t),function(st){setQ(st);});};
-    r.appendChild(heart(t));r.appendChild(p);r.appendChild(a);box.appendChild(r);
+    r.appendChild(heart(t));r.appendChild(dlbtn(t));r.appendChild(p);r.appendChild(a);box.appendChild(r);
   });
   paintHearts();
 }
@@ -668,7 +684,7 @@ function showLibrary(){
       tt.onclick=function(){playNow(t);};
       r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
       var a=el('button','ib','+');a.title='Add to queue';a.onclick=function(){api('add',JSON.stringify(t),function(st){setQ(st);});};
-      r.appendChild(heart(t));r.appendChild(a);box.appendChild(r);
+      r.appendChild(heart(t));r.appendChild(dlbtn(t));r.appendChild(a);box.appendChild(r);
     });
   }else{box.appendChild(el('div','msg','Tap the heart on a song to keep it here.'));}
   box.appendChild(el('h2',null,'Playlists ('+Lib.lists.length+')'));
@@ -742,6 +758,7 @@ $('vol').addEventListener('change',function(){api('vol',this.value,function(){})
 $('rep').onclick=function(){api('repeat',((Q.repeat||0)+1)%3,function(st){setQ(st);});};
 $('sh').onclick=function(){api('shuffle',null,function(st){setQ(st);});};
 $('lib').onclick=function(){api('lib',null,function(d){setLib(d);showLibrary();});};
+$('dlc').onclick=function(){var t=Q.tracks[Q.cur];if(t)dlbtn(t).onclick({stopPropagation:function(){}});};
 $('lk').onclick=function(){var t=Q.tracks[Q.cur];if(t)api('like',JSON.stringify(t),function(d){setLib(d);});};
 $('ps').onclick=function(){var n=$('pn').value.trim();if(!n){say('Type a name for the playlist first.');return;}
   api('plsave',n,function(d){if(d&&d.liked){setLib(d);say('Playlist “'+n+'” saved.');$('pn').value='';}else say((d&&d.error)||'Could not save the playlist.');});};
@@ -783,7 +800,7 @@ pub(crate) fn page_html() -> String {
          <div class=\"tools\"><button id=\"rep\" class=\"small\">Repeat: off</button><button id=\"sh\" class=\"small\">Shuffle</button><button id=\"clr\" class=\"small\">Clear</button></div>\
          <div class=\"tools\"><input id=\"pn\" placeholder=\"Playlist name\" maxlength=\"60\"><button id=\"ps\" class=\"small\">Save queue</button></div>\
          <div id=\"q\"></div></aside></div></main>\
-         <div id=\"bar\"><div id=\"now\"><b id=\"nt\">Nothing playing</b><span id=\"nc\"></span></div><button id=\"lk\" class=\"ib\" hidden>\u{2661}</button>\
+         <div id=\"bar\"><div id=\"now\"><b id=\"nt\">Nothing playing</b><span id=\"nc\"></span></div><button id=\"lk\" class=\"ib\" hidden>\u{2661}</button><button id=\"dlc\" class=\"ib\" title=\"Download this song as an MP3\">\u{2B07}</button>\
          <div id=\"ctl\"><button id=\"pv\" class=\"ib\" title=\"Previous\">\u{23EE}</button>\
          <button id=\"pp\" title=\"Play or pause\">\u{25B6}</button>\
          <button id=\"nx\" class=\"ib\" title=\"Next\">\u{23ED}</button></div>\
@@ -974,7 +991,7 @@ mod tests {
     #[test]
     fn the_page_has_what_the_script_needs() {
         let html = page_html();
-        for id in ["sh", "lib", "lk", "pn", "ps", "sf", "qi", "res", "more", "q", "qn", "rep", "clr", "pp", "pv", "nx", "seek", "tm", "vol", "nt", "nc", "lt", "msg", "a"] {
+        for id in ["dlc", "sh", "lib", "lk", "pn", "ps", "sf", "qi", "res", "more", "q", "qn", "rep", "clr", "pp", "pv", "nx", "seek", "tm", "vol", "nt", "nc", "lt", "msg", "a"] {
             assert!(html.contains(&format!("id=\"{id}\"")), "missing id {id}");
         }
     }
