@@ -658,9 +658,19 @@ impl Gui {
                         sidebar::Action::MoveBookmark(index, folder) => {
                             library::set_bookmark_folder(index, &folder)
                         },
+                        sidebar::Action::MoveBookmarkTo { from, to } => library::move_bookmark(from, to),
                         sidebar::Action::MoveTab { from, to } => {
                             if let (Some(from), Some(to)) = (ids.get(from), ids.get(to)) {
                                 window.move_tab(*from, *to);
+                            }
+                        },
+                        sidebar::Action::OpenExternal(index) => {
+                            if let Some(url) = ids
+                                .get(index)
+                                .and_then(|id| window.webview_by_id(*id))
+                                .and_then(|webview| webview.url())
+                            {
+                                crate::downloads::open_in_default_browser(url.as_str());
                             }
                         },
                         sidebar::Action::TogglePin(index) => {
@@ -1240,6 +1250,24 @@ impl Gui {
             } else if close {
                 crate::passwords::dismiss_offer();
             }
+        } else if let Some(webview) = &active &&
+            let Some(page) = &page &&
+            matches!(page.scheme(), "http" | "https") &&
+            webview
+                .page_title()
+                .is_some_and(|title| title.starts_with("Just a moment") || title.starts_with("Attention Required"))
+        {
+            // A "checking your browser" page that Pteron usually cannot get past.
+            let mut open = false;
+            place("pteron_challenge_hint").show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label("This site is checking your browser and Pteron may not get through.");
+                    open = ui.button("Open in default browser").clicked();
+                });
+            });
+            if open {
+                crate::downloads::open_in_default_browser(page.as_str());
+            }
         } else if let Some(text) = crate::passwords::message() {
             place("pteron_password_message").show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1572,6 +1600,7 @@ fn apply_theme(ctx: &egui::Context, settings: &pteron::Settings) {
     if let Some(p) = &palette {
         let theme = if p.dark { egui::Theme::Dark } else { egui::Theme::Light };
         ctx.set_visuals_of(theme, visuals_for(p));
+        crate::appearance::polish_style(ctx);
         return;
     }
     // Plain looks keep their own colours; the chosen accent tints selections and links.
@@ -1584,6 +1613,7 @@ fn apply_theme(ctx: &egui::Context, settings: &pteron::Settings) {
         style.visuals.text_cursor.stroke.color = accent;
         style.visuals.widgets.hovered.bg_stroke.color = accent.gamma_multiply(0.7);
     });
+    crate::appearance::polish_style(ctx);
 }
 
 fn load_pending_favicons(

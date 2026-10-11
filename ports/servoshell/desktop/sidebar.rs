@@ -87,6 +87,8 @@ pub(crate) enum Action {
     Wake(usize),
     CloseSleeping(usize),
     TogglePin(usize),
+    /// Open this tab's page in the computer's default browser.
+    OpenExternal(usize),
     TogglePinSleeping(usize),
     ToggleBookmark,
     /// Show the page in reading mode.
@@ -96,6 +98,8 @@ pub(crate) enum Action {
     RemoveBookmark(usize),
     /// Put a bookmark into a folder (empty name: no folder).
     MoveBookmark(usize, String),
+    /// Drag a bookmark: move bookmark `from` to where bookmark `to` is.
+    MoveBookmarkTo { from: usize, to: usize },
     SetExperimental(bool),
     ToggleSettings,
 }
@@ -108,9 +112,17 @@ pub(crate) struct State {
     pub pinned: bool,
     /// Ask the address bar to take keyboard focus (Ctrl+L).
     pub focus_location: bool,
+    /// Text typed in the "Filter tabs and bookmarks" box.
+    pub filter: String,
     /// Width of the part of the window (from the left edge) that belongs to the sidebar
     /// right now, including the hot zone when hidden. Used to route mouse events.
     pub hit_width: f32,
+}
+
+/// Whether `text` contains every word of `filter` (ignoring case). An empty filter matches all.
+pub(crate) fn filter_matches(filter: &str, text: &str) -> bool {
+    let text = text.to_lowercase();
+    filter.split_whitespace().all(|word| text.contains(&word.to_lowercase()))
 }
 
 /// Decide whether the sidebar is shown this frame.
@@ -326,6 +338,7 @@ pub(crate) fn show(
     // Forget a finished tab drag.
     if ui.input(|input| !input.pointer.any_down() && !input.pointer.any_released()) {
         ui.memory_mut(|memory| memory.data.remove::<usize>(Id::new("pteron_tab_drag")));
+        ui.memory_mut(|memory| memory.data.remove::<usize>(Id::new("pteron_bookmark_drag")));
     }
     // A steady, clearly visible typing cursor. (The blinking one needs timed repaints, which
     // Pteron does not run while idle, so it could stay invisible.)
@@ -426,33 +439,59 @@ fn framed(
                     });
                     ui.add_space(4.0);
 
-                    // Address bar.
+                    // Address bar: a lock (or warning) at the left, a copy-link button at the right.
                     let location_id = Id::new(LOCATION_ID);
-                    let field = ui.add_sized(
-                        [inner_width, 28.0],
-                        TextEdit::singleline(location)
-                            .id(location_id)
-                            .hint_text("Search or enter address"),
-                    );
+                    let field = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let mut width = inner_width - 32.0;
+                            match model.security {
+                                Security::Secure => {
+                                    ui.label(RichText::new("\u{1F512}").size(13.0).color(Color32::from_rgb(70, 160, 90)))
+                                        .on_hover_text("Secure connection (https)");
+                                    width -= 22.0;
+                                },
+                                Security::NotSecure => {
+                                    ui.label(RichText::new("\u{26A0}").size(14.0).color(Color32::from_rgb(220, 150, 40)))
+                                        .on_hover_text("Not secure (http)");
+                                    width -= 22.0;
+                                },
+                                Security::None => {},
+                            }
+                            let field = ui.add_sized(
+                                [width, 28.0],
+                                TextEdit::singleline(location)
+                                    .id(location_id)
+                                    .hint_text("Search or enter address"),
+                            );
+                            let copied_id = Id::new("pteron_link_copied");
+                            let now = ui.input(|input| input.time);
+                            let copied_at: Option<f64> = ui.memory(|m| m.data.get_temp(copied_id));
+                            let recently = copied_at.is_some_and(|t| now - t < 1.3);
+                            let label = if recently { "\u{2713}" } else { "\u{29C9}" };
+                            if ui
+                                .add_sized([24.0, 28.0], Button::new(RichText::new(label).size(14.0)).frame(false))
+                                .on_hover_text("Copy link")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(location.clone());
+                                ui.memory_mut(|m| m.data.insert_temp(copied_id, now));
+                            }
+                            if recently {
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+                            }
+                            field
+                        })
+                        .inner;
                     if field.changed() {
                         *location_dirty = true;
                     }
-                    match model.security {
-                        Security::Secure => {
-                            ui.label(
-                                RichText::new("\u{1F512} Secure connection (https)")
-                                    .small()
-                                    .color(Color32::from_rgb(70, 160, 90)),
-                            );
-                        },
-                        Security::NotSecure => {
-                            ui.label(
-                                RichText::new("\u{26A0} Not secure (http) - do not enter passwords")
-                                    .small()
-                                    .color(Color32::from_rgb(220, 150, 40)),
-                            );
-                        },
-                        Security::None => {},
+                    if model.security == Security::NotSecure {
+                        ui.label(
+                            RichText::new("Not secure (http) - do not enter passwords")
+                                .small()
+                                .color(Color32::from_rgb(220, 150, 40)),
+                        );
                     }
                     if field.has_focus() && *location_dirty && !model.suggestions.is_empty() {
                         suggestion_popup(
@@ -539,6 +578,23 @@ fn framed(
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
                     }
                     ui.add_space(6.0);
+                    let total = model.tabs.len() + model.sleeping.len() + model.bookmarks.len();
+                    if total >= 6 || !state.filter.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let clear_width = if state.filter.is_empty() { 0.0 } else { 26.0 };
+                            ui.add_sized(
+                                [inner_width - clear_width - 4.0, 24.0],
+                                TextEdit::singleline(&mut state.filter).hint_text("Filter tabs and bookmarks"),
+                            );
+                            if !state.filter.is_empty() &&
+                                ui.add_sized([22.0, 24.0], Button::new("\u{00D7}").frame(false)).on_hover_text("Clear filter").clicked()
+                            {
+                                state.filter.clear();
+                            }
+                        });
+                    }
+                    let filter = state.filter.trim().to_string();
                     ui.separator();
 
                     // Vertical tab list.
@@ -561,18 +617,23 @@ fn framed(
                                     ui.add_space(2.0);
                                 }
                                 for (index, tab) in model.tabs.iter().enumerate() {
-                                    if tab.pinned == section_pinned {
+                                    if tab.pinned == section_pinned && filter_matches(&filter, &tab.label) {
                                         tab_row(ui, index, tab, actions);
                                     }
                                 }
                                 for (index, tab) in model.sleeping.iter().enumerate() {
-                                    if tab.pinned == section_pinned {
+                                    if tab.pinned == section_pinned && filter_matches(&filter, &tab.label) {
                                         sleeping_row(ui, index, tab, actions);
                                     }
                                 }
                             }
                             downloads_section(ui);
-                            if !model.bookmarks.is_empty() {
+                            let shown = model
+                                .bookmarks
+                                .iter()
+                                .filter(|b| filter_matches(&filter, &format!("{} {}", b.label, b.url)))
+                                .count();
+                            if !model.bookmarks.is_empty() && shown > 0 {
                                 ui.add_space(6.0);
                                 ui.separator();
                                 ui.label(RichText::new("Bookmarks").small().weak());
@@ -584,22 +645,31 @@ fn framed(
                                     .collect();
                                 folders.sort_by_key(|name| name.to_lowercase());
                                 folders.dedup();
-                                for (index, bookmark) in model.bookmarks.iter().enumerate() {
-                                    if bookmark.folder.is_empty() {
-                                        bookmark_row(ui, index, bookmark, &folders, actions);
+                                if filter.is_empty() {
+                                    for (index, bookmark) in model.bookmarks.iter().enumerate() {
+                                        if bookmark.folder.is_empty() {
+                                            bookmark_row(ui, index, bookmark, &folders, true, actions);
+                                        }
                                     }
-                                }
-                                for name in &folders {
-                                    egui::CollapsingHeader::new(RichText::new(*name).size(13.0))
-                                        .id_salt(("pteron_bookmark_folder", *name))
-                                        .default_open(false)
-                                        .show(ui, |ui| {
-                                            for (index, bookmark) in model.bookmarks.iter().enumerate() {
-                                                if bookmark.folder == *name {
-                                                    bookmark_row(ui, index, bookmark, &folders, actions);
+                                    for name in &folders {
+                                        egui::CollapsingHeader::new(RichText::new(*name).size(13.0))
+                                            .id_salt(("pteron_bookmark_folder", *name))
+                                            .default_open(false)
+                                            .show(ui, |ui| {
+                                                for (index, bookmark) in model.bookmarks.iter().enumerate() {
+                                                    if bookmark.folder == *name {
+                                                        bookmark_row(ui, index, bookmark, &folders, true, actions);
+                                                    }
                                                 }
-                                            }
-                                        });
+                                            });
+                                    }
+                                } else {
+                                    // While filtering, matching bookmarks are listed flat.
+                                    for (index, bookmark) in model.bookmarks.iter().enumerate() {
+                                        if filter_matches(&filter, &format!("{} {}", bookmark.label, bookmark.url)) {
+                                            bookmark_row(ui, index, bookmark, &folders, false, actions);
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -781,7 +851,15 @@ fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Acti
     let text_color = visuals.text_color();
     let painter = ui.painter();
     if let Some(fill) = fill {
-        painter.rect_filled(rect, 6.0, fill);
+        painter.rect_filled(rect, 8.0, fill);
+    }
+    if tab.active {
+        // A bar in the accent colour on the left edge marks the tab you are on.
+        painter.rect_filled(
+            Rect::from_min_size(pos2(rect.min.x + 1.0, rect.min.y + 6.0), vec2(3.0, rect.height() - 12.0)),
+            2.0,
+            accent_color(),
+        );
     }
     if let Some(favicon) = tab.favicon {
         let icon_rect = Rect::from_min_size(pos2(rect.min.x + 6.0, rect.center().y - 8.0), vec2(16.0, 16.0));
@@ -802,8 +880,11 @@ fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Acti
     );
     if tab.pinned {
         // A pinned tab shows a pin instead of a close button; clicking it unpins.
-        pin_glyph(painter, close_rect.center(), text_color, row_hovered);
+        pin_glyph(painter, close_rect.center(), accent_color(), row_hovered);
     } else if row_hovered {
+        if close.hovered() {
+            painter.circle_filled(close_rect.center(), 10.0, text_color.gamma_multiply(0.18));
+        }
         painter.text(
             close_rect.center(),
             Align2::CENTER_CENTER,
@@ -824,10 +905,15 @@ fn tab_row(ui: &mut egui::Ui, index: usize, tab: &TabRow, actions: &mut Vec<Acti
     } else if response.clicked() && !tab.active {
         actions.push(Action::Activate(index));
     }
+    let response = if tab.label.chars().count() > 26 { response.on_hover_text(&tab.label) } else { response };
     response.context_menu(|ui| {
         let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
         if ui.button(pin_label).clicked() {
             actions.push(Action::TogglePin(index));
+            ui.close();
+        }
+        if ui.button("Open in default browser").clicked() {
+            actions.push(Action::OpenExternal(index));
             ui.close();
         }
         if ui.button("Close tab").clicked() {
@@ -871,15 +957,23 @@ fn suggestion_popup(
                         suggestion.title.as_str()
                     };
                     let clip = ui.painter().with_clip_rect(rect.shrink2(vec2(4.0, 0.0)));
+                    // A star for bookmarks, a clock for pages from history.
                     clip.text(
-                        pos2(rect.min.x + 8.0, rect.min.y + 11.0),
+                        pos2(rect.min.x + 14.0, rect.center().y),
+                        Align2::CENTER_CENTER,
+                        if suggestion.bookmarked { "\u{2605}" } else { "\u{29D6}" },
+                        FontId::proportional(14.0),
+                        if suggestion.bookmarked { accent_color() } else { weak },
+                    );
+                    clip.text(
+                        pos2(rect.min.x + 30.0, rect.min.y + 11.0),
                         Align2::LEFT_CENTER,
                         title,
                         FontId::proportional(13.0),
                         text_color,
                     );
                     clip.text(
-                        pos2(rect.min.x + 8.0, rect.min.y + 27.0),
+                        pos2(rect.min.x + 30.0, rect.min.y + 27.0),
                         Align2::LEFT_CENTER,
                         &suggestion.url,
                         FontId::proportional(11.0),
@@ -901,10 +995,35 @@ fn bookmark_row(
     index: usize,
     bookmark: &BookmarkRow,
     folders: &[&str],
+    can_drag: bool,
     actions: &mut Vec<Action>,
 ) {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), ROW_HEIGHT),
+        if can_drag { Sense::click_and_drag() } else { Sense::click() },
+    );
+    // Drag to reorder, like tabs.
+    let drag_key = Id::new("pteron_bookmark_drag");
+    if can_drag {
+        if response.drag_started() {
+            ui.memory_mut(|memory| memory.data.insert_temp(drag_key, index));
+        }
+        let dragged: Option<usize> = ui.memory(|memory| memory.data.get_temp(drag_key));
+        if let Some(from) = dragged &&
+            from != index &&
+            ui.rect_contains_pointer(rect) &&
+            ui.input(|input| input.pointer.is_decidedly_dragging() || input.pointer.any_released())
+        {
+            let y = if from > index { rect.min.y } else { rect.max.y };
+            ui.painter().line_segment(
+                [pos2(rect.min.x + 4.0, y), pos2(rect.max.x - 4.0, y)],
+                Stroke::new(2.0, accent_color()),
+            );
+            if ui.input(|input| input.pointer.any_released()) {
+                actions.push(Action::MoveBookmarkTo { from, to: index });
+            }
+        }
+    }
     let visuals = ui.visuals();
     let fill = response
         .hovered()
@@ -912,7 +1031,7 @@ fn bookmark_row(
     let text_color = visuals.text_color();
     let painter = ui.painter();
     if let Some(fill) = fill {
-        painter.rect_filled(rect, 6.0, fill);
+        painter.rect_filled(rect, 8.0, fill);
     }
     painter.with_clip_rect(rect).text(
         pos2(rect.min.x + 8.0, rect.center().y),

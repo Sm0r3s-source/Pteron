@@ -321,6 +321,17 @@ pub(crate) fn set_bookmark_folder(index: usize, folder: &str) {
     });
 }
 
+/// Moves a bookmark to where another one is (drag and drop in the sidebar).
+pub(crate) fn move_bookmark(from: usize, to: usize) {
+    with(|data| {
+        if from != to && from < data.bookmarks.len() && to < data.bookmarks.len() {
+            let item = data.bookmarks.remove(from);
+            data.bookmarks.insert(to, item);
+            save_bookmarks(data);
+        }
+    });
+}
+
 /// The folder names in use, sorted, without repeats.
 pub(crate) fn folder_names(list: &[Bookmark]) -> Vec<String> {
     let mut names: Vec<String> = list

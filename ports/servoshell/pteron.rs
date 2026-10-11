@@ -662,6 +662,29 @@ if(!/(^|\.)google\.[a-z.]+$/.test(h))return;
 var s=document.createElement('style');
 s.textContent='#rso [role="button"][aria-haspopup],#rso a[href*="translate.google."],#rso a[href*="/search?q=related"]{display:none!important}';
 (document.head||document.documentElement).appendChild(s);
+// Google's AI overview: "Show more" does nothing in Servo, so open the clipped box ourselves.
+var MORE=/^(rodyti daugiau|rodyti viską|show more|show all|more)$/i;
+document.addEventListener('click',function(ev){try{
+var b=ev.target&&ev.target.closest&&ev.target.closest('[role="button"],button,[aria-expanded]');
+if(!b)return;
+var t=(b.innerText||b.textContent||'').trim();
+if(!(MORE.test(t)||(b.getAttribute('aria-expanded')==='false'&&b.closest('#rso,#center_col,#main,main'))))return;
+setTimeout(function(){try{
+var n=b.parentElement,k=0;
+while(n&&n!==document.body&&k<14){
+var cs=getComputedStyle(n);
+if(cs.overflowY!=='visible'&&n.scrollHeight>n.clientHeight+4){
+n.style.setProperty('max-height','none','important');
+n.style.setProperty('height','auto','important');
+n.style.setProperty('overflow','visible','important');
+}
+n=n.parentElement;k++;
+}
+var w=b.parentElement;
+var box=(w&&w.children.length===1)?w:b;
+box.style.setProperty('display','none','important');
+}catch(e){}},250);
+}catch(e){}},true);
 }catch(e){}})();"#;
 
 #[cfg(test)]
@@ -670,6 +693,7 @@ mod google_fix_tests {
     fn script_is_scoped_to_google() {
         assert!(super::GOOGLE_FIX_SCRIPT.contains("google\\.[a-z.]+$"));
         assert!(super::GOOGLE_FIX_SCRIPT.contains("aria-haspopup"));
+        assert!(super::GOOGLE_FIX_SCRIPT.contains("rodyti daugiau"));
     }
 }
 

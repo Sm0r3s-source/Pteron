@@ -107,6 +107,19 @@ impl Queue {
         }
     }
 
+    /// Mixes the songs after the playing one (all of them when nothing is playing).
+    pub(crate) fn shuffle(&mut self, mut seed: u64) {
+        let start = self.cur.map(|c| c + 1).unwrap_or(0).min(self.tracks.len());
+        let tail = &mut self.tracks[start..];
+        seed |= 1;
+        for i in (1..tail.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            tail.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.tracks.clear();
         self.cur = None;
@@ -242,6 +255,115 @@ fn with_queue<T>(change: impl FnOnce(&mut Queue) -> T, save: bool) -> (T, Value)
     (result, state)
 }
 
+// ---------------------------------------------------------------- liked songs and playlists
+
+const MAX_LIKED: usize = 2000;
+const MAX_LISTS: usize = 50;
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct Library {
+    pub liked: Vec<Track>,
+    pub lists: Vec<(String, Vec<Track>)>,
+}
+
+impl Library {
+    /// Likes the song, or takes the like back. Returns whether it is liked now.
+    pub(crate) fn toggle_like(&mut self, track: Track) -> bool {
+        if let Some(i) = self.liked.iter().position(|t| t.id == track.id) {
+            self.liked.remove(i);
+            return false;
+        }
+        if self.liked.len() >= MAX_LIKED {
+            return false;
+        }
+        self.liked.insert(0, track);
+        true
+    }
+
+    /// Files the songs as a playlist (a playlist with the same name is replaced).
+    pub(crate) fn save_list(&mut self, name: &str, tracks: Vec<Track>) -> bool {
+        let name = clip(name, 60);
+        if name.is_empty() || tracks.is_empty() {
+            return false;
+        }
+        if let Some(entry) = self.lists.iter_mut().find(|(n, _)| *n == name) {
+            entry.1 = tracks;
+            return true;
+        }
+        if self.lists.len() >= MAX_LISTS {
+            return false;
+        }
+        self.lists.push((name, tracks));
+        true
+    }
+
+    pub(crate) fn delete_list(&mut self, name: &str) {
+        self.lists.retain(|(n, _)| n != name);
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "liked": self.liked.iter().map(Track::to_value).collect::<Vec<_>>(),
+            "lists": self.lists.iter().map(|(n, t)| json!({"name": n, "tracks": t.iter().map(Track::to_value).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+        })
+    }
+
+    pub(crate) fn from_json(text: &str) -> Library {
+        let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        let tracks = |v: Option<&Value>, max: usize| -> Vec<Track> {
+            v.and_then(|x| x.as_array())
+                .map(|list| list.iter().filter_map(Track::from_value).take(max).collect())
+                .unwrap_or_default()
+        };
+        let mut library = Library { liked: tracks(v.get("liked"), MAX_LIKED), lists: Vec::new() };
+        if let Some(lists) = v.get("lists").and_then(|l| l.as_array()) {
+            for list in lists.iter().take(MAX_LISTS) {
+                let name = clip(list.get("name").and_then(|n| n.as_str()).unwrap_or(""), 60);
+                let items = tracks(list.get("tracks"), MAX_TRACKS);
+                if !name.is_empty() && !items.is_empty() {
+                    library.lists.push((name, items));
+                }
+            }
+        }
+        library
+    }
+}
+
+static LIBRARY: Mutex<Option<Library>> = Mutex::new(None);
+
+fn library_file() -> Option<PathBuf> {
+    ::dirs::config_dir().map(|d| d.join(crate::pteron::APP_NAME).join("music").join("library.json"))
+}
+
+fn with_library<T>(change: impl FnOnce(&mut Library) -> T, save: bool) -> (T, Value) {
+    let mut guard = LIBRARY.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(
+            library_file()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|t| Library::from_json(&t))
+                .unwrap_or_default(),
+        );
+    }
+    let library = guard.as_mut().expect("library was just made");
+    let result = change(library);
+    let state = library.to_json();
+    if save && let Some(file) = library_file() {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, state.to_string());
+    }
+    (result, state)
+}
+
+fn time_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(88172645463325252)
+}
+
 /// What the sidebar shows: the playing song, while the Music page is open.
 pub(crate) struct NowPlaying {
     pub title: String,
@@ -341,6 +463,28 @@ pub(crate) fn command(value: &str) -> String {
             Err(_) => error("bad number"),
         },
         "clear" => with_queue(|q| q.clear(), true).1.to_string(),
+        "shuffle" => with_queue(|q| q.shuffle(time_seed()), true).1.to_string(),
+        "lib" => with_library(|_| (), false).1.to_string(),
+        "like" => match serde_json::from_str::<Value>(arg).ok().as_ref().and_then(Track::from_value) {
+            Some(track) => with_library(|l| l.toggle_like(track), true).1.to_string(),
+            None => error("bad song"),
+        },
+        "plsave" => {
+            let tracks = with_queue(|q| q.tracks.clone(), false).0;
+            let (ok, state) = with_library(|l| l.save_list(arg, tracks), true);
+            if ok { state.to_string() } else { error("Give the playlist a name and add songs to the queue first.") }
+        },
+        "pldel" => with_library(|l| l.delete_list(arg), true).1.to_string(),
+        "pladd" => {
+            let tracks: Vec<Track> = if arg == "*liked" {
+                with_library(|l| l.liked.clone(), false).0
+            } else {
+                with_library(|l| l.lists.iter().find(|(n, _)| n == arg).map(|(_, t)| t.clone()).unwrap_or_default(), false).0
+            };
+            let (added, mut state) = with_queue(|q| tracks.into_iter().filter(|t| q.add(t.clone())).count(), true);
+            state["added"] = json!(added);
+            state.to_string()
+        },
         "cur" => match arg.parse::<usize>() {
             Ok(i) => with_queue(|q| q.set_current(i), true).1.to_string(),
             Err(_) => error("bad number"),
@@ -421,11 +565,28 @@ h2{font-size:15px;margin:6px 0 10px;color:var(--mut);font-weight:600}
 .sl b{position:absolute;top:3px;left:0;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--gold);box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .time{color:var(--mut);font-size:13px;min-width:90px;text-align:center}
 @media (max-width:700px){#now{width:120px}#vol,.time{display:none}}
+header{background:linear-gradient(180deg,rgba(214,170,72,.10),transparent 120%),var(--bg)}
+.search input:focus{outline:0;border-color:var(--gold);box-shadow:0 0 0 3px rgba(214,170,72,.22)}
+.row{transition:background .12s,border-color .12s}
+.row.on{background:rgba(214,170,72,.10)}
+.row .n{font-weight:500}
+.ib{transition:color .12s,background .12s}
+.ib.liked{color:#e0527a}
+#bar{box-shadow:0 -6px 22px rgba(0,0,0,.14)}
+#pp{box-shadow:0 2px 8px rgba(0,0,0,.25);transition:transform .1s}
+#pp:active{transform:scale(.94)}
+.sl:hover:before{height:8px;top:6px}
+.sl:hover i{height:8px;top:6px}
+.pl{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);margin:0 0 8px}
+.pl .t{flex:1;min-width:0}
+#pn{font:inherit;font-size:14px;padding:5px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg);width:130px;min-width:0}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+#res .row,#q .row,.pl{animation:fadein .16s ease-out}
 "#;
 
 const JS: &str = r#"
 (function(){
-var U='@U@',A=document.getElementById('a'),Q={tracks:[],cur:null,repeat:0,vol:0.8},R={},gen=0,asked={},next=null,title='';
+var U='@U@',A=document.getElementById('a'),Q={tracks:[],cur:null,repeat:0,vol:0.8},R={},gen=0,asked={},next=null,title='',Lib={liked:[],lists:[]},LK={};
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
 function $(i){return document.getElementById(i);}
 // Servo cannot drag a real range input yet, so the two sliders are drawn and handled here.
@@ -447,6 +608,9 @@ function fmt(s){s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;if(
 function api(cmd,arg,cb){var x=new XMLHttpRequest();x.open('GET',U+'?x='+encodeURIComponent(arg===undefined||arg===null?cmd:cmd+':'+arg));
   x.onload=function(){var d=null;try{d=JSON.parse(x.responseText);}catch(e){}cb(d);};x.onerror=function(){cb(null);};x.send();}
 function setQ(st){if(st&&st.tracks){Q=st;renderQ();}}
+function setLib(d){if(d&&d.liked){Lib=d;LK={};d.liked.forEach(function(t){LK[t.id]=1;});paintHearts();}}
+function paintHearts(){var all=document.querySelectorAll('[data-h]');for(var i=0;i<all.length;i++){var b=all[i],on=!!LK[b.getAttribute('data-h')];b.textContent=on?'♥':'♡';b.className=on?'ib liked':'ib';b.title=on?'Remove from liked songs':'Add to liked songs';}}
+function heart(t){var b=el('button','ib','♡');b.setAttribute('data-h',t.id);b.onclick=function(e){e.stopPropagation();api('like',JSON.stringify(t),function(d){setLib(d);});};return b;}
 function say(m){var s=$('msg');s.textContent=m||'';}
 function renderQ(){
   var box=$('q');box.textContent='';
@@ -458,14 +622,16 @@ function renderQ(){
     tt.onclick=function(){play(i);};
     r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
     var x=el('button','ib','×');x.title='Remove';x.onclick=function(){api('rm',i,function(st){setQ(st);});};
-    r.appendChild(x);box.appendChild(r);
+    r.appendChild(heart(t));r.appendChild(x);box.appendChild(r);
   });
+  paintHearts();
   $('rep').textContent='Repeat: '+['off','all','one'][Q.repeat||0];
   var cur=Q.tracks[Q.cur];
   title=cur?cur.title:'';
   $('nt').textContent=cur?cur.title:'Nothing playing';
   $('nc').textContent=cur?cur.channel:'';
   document.title=(cur?cur.title+' - ':'')+'Plume Music';
+  var lk=$('lk');if(cur){lk.setAttribute('data-h',cur.id);lk.hidden=false;paintHearts();}else{lk.hidden=true;}
 }
 function renderList(items,heading,listId,append){
   var box=$('res');
@@ -484,8 +650,37 @@ function renderList(items,heading,listId,append){
     r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
     var p=el('button','ib','▶');p.title='Play now';p.onclick=function(){playNow(t);};
     var a=el('button','ib','+');a.title='Add to queue';a.onclick=function(){api('add',JSON.stringify(t),function(st){setQ(st);});};
-    r.appendChild(p);r.appendChild(a);box.appendChild(r);
+    r.appendChild(heart(t));r.appendChild(p);r.appendChild(a);box.appendChild(r);
   });
+  paintHearts();
+}
+function showLibrary(){
+  var box=$('res');box.textContent='';$('lt').textContent='Your library';say('');$('more').hidden=true;next=null;
+  var head=el('h2',null,'Liked songs ('+Lib.liked.length+')');box.appendChild(head);
+  if(Lib.liked.length){
+    var tl=el('div','tools');
+    var go=el('button','small gold','Play all');go.onclick=function(){api('clear',null,function(){api('pladd','*liked',function(st){setQ(st);if(st&&st.tracks&&st.tracks.length)play(0);});});};
+    var all=el('button','small','Add all to queue');all.onclick=function(){api('pladd','*liked',function(st){say(st&&st.added!==undefined?st.added+' songs added.':'');setQ(st);});};
+    tl.appendChild(go);tl.appendChild(all);box.appendChild(tl);
+    var tmp=document.createElement('div');tmp.id='res2';
+    Lib.liked.forEach(function(t){
+      var r=el('div','row');var tt=el('div','t');tt.appendChild(el('div','n',t.title));tt.appendChild(el('div','c',t.channel));
+      tt.onclick=function(){playNow(t);};
+      r.appendChild(tt);r.appendChild(el('div','d',t.duration?fmt(t.duration):''));
+      var a=el('button','ib','+');a.title='Add to queue';a.onclick=function(){api('add',JSON.stringify(t),function(st){setQ(st);});};
+      r.appendChild(heart(t));r.appendChild(a);box.appendChild(r);
+    });
+  }else{box.appendChild(el('div','msg','Tap the heart on a song to keep it here.'));}
+  box.appendChild(el('h2',null,'Playlists ('+Lib.lists.length+')'));
+  if(!Lib.lists.length){box.appendChild(el('div','msg','Type a name next to the queue and press Save queue to make a playlist.'));}
+  Lib.lists.forEach(function(l){
+    var r=el('div','pl');var tt=el('div','t');tt.appendChild(el('div','n',l.name));tt.appendChild(el('div','c',l.tracks.length+' songs'));
+    var go=el('button','small gold','Play');go.onclick=function(){api('clear',null,function(){api('pladd',l.name,function(st){setQ(st);if(st&&st.tracks&&st.tracks.length)play(0);});});};
+    var ad=el('button','small','Add');ad.onclick=function(){api('pladd',l.name,function(st){say(st&&st.added!==undefined?st.added+' songs added.':'');setQ(st);});};
+    var dl=el('button','ib','×');dl.title='Delete playlist';dl.onclick=function(){api('pldel',l.name,function(d){setLib(d);showLibrary();});};
+    r.appendChild(tt);r.appendChild(go);r.appendChild(ad);r.appendChild(dl);box.appendChild(r);
+  });
+  paintHearts();
 }
 function search(text){
   var m=text.match(/(?:^|[?&])list=([A-Za-z0-9_-]{10,64})/),id=m?m[1]:null;
@@ -545,6 +740,11 @@ $('pp').onclick=toggle;$('nx').onclick=function(){advance('user');};$('pv').oncl
 $('vol').addEventListener('input',function(){A.volume=parseFloat(this.value);});
 $('vol').addEventListener('change',function(){api('vol',this.value,function(){});});
 $('rep').onclick=function(){api('repeat',((Q.repeat||0)+1)%3,function(st){setQ(st);});};
+$('sh').onclick=function(){api('shuffle',null,function(st){setQ(st);});};
+$('lib').onclick=function(){api('lib',null,function(d){setLib(d);showLibrary();});};
+$('lk').onclick=function(){var t=Q.tracks[Q.cur];if(t)api('like',JSON.stringify(t),function(d){setLib(d);});};
+$('ps').onclick=function(){var n=$('pn').value.trim();if(!n){say('Type a name for the playlist first.');return;}
+  api('plsave',n,function(d){if(d&&d.liked){setLib(d);say('Playlist “'+n+'” saved.');$('pn').value='';}else say((d&&d.error)||'Could not save the playlist.');});};
 $('clr').onclick=function(){api('clear',null,function(st){setQ(st);});};
 $('more').onclick=function(){if(!next)return;var tok=next;next=null;api('more',tok,function(d){if(!d||d.error){say('Could not load more.');return;}next=d.next;$('more').hidden=!next;renderList(d.items,'',null,true);});};
 $('sf').addEventListener('submit',function(e){e.preventDefault();var v=$('qi').value.trim();if(v)search(v);});
@@ -557,6 +757,7 @@ setInterval(function(){
     if(d.cmd==='toggle')toggle();else if(d.cmd==='next')advance('user');else if(d.cmd==='prev')back();
   });
 },1000);
+api('lib',null,function(d){setLib(d);});
 api('get',null,function(st){
   if(st&&st.tracks){Q=st;A.volume=Q.vol;$('vol').value=Q.vol;renderQ();}
   fromHash();
@@ -573,14 +774,16 @@ pub(crate) fn page_html() -> String {
          <header><a class=\"brand\" href=\"https://music.youtube.com/\">Plume Music</a>\
          <form id=\"sf\" class=\"search\"><input id=\"qi\" placeholder=\"Search songs, or paste a playlist link\" autofocus>\
          <button type=\"submit\">Search</button></form>\
+         <button id=\"lib\" class=\"small\">Library</button>\
          <a class=\"plain\" href=\"https://www.youtube.com/\">Video</a></header>\
          <main><div class=\"cols\"><section><h2 id=\"lt\">Search for music</h2><div id=\"msg\" class=\"msg\"></div>\
          <div id=\"res\"><div class=\"msg\">Type a song or artist above. To play an album or playlist, paste its link.</div></div>\
          <button id=\"more\" class=\"small\" hidden>Show more</button></section>\
          <aside><h2>Queue <span id=\"qn\"></span></h2>\
-         <div class=\"tools\"><button id=\"rep\" class=\"small\">Repeat: off</button><button id=\"clr\" class=\"small\">Clear</button></div>\
+         <div class=\"tools\"><button id=\"rep\" class=\"small\">Repeat: off</button><button id=\"sh\" class=\"small\">Shuffle</button><button id=\"clr\" class=\"small\">Clear</button></div>\
+         <div class=\"tools\"><input id=\"pn\" placeholder=\"Playlist name\" maxlength=\"60\"><button id=\"ps\" class=\"small\">Save queue</button></div>\
          <div id=\"q\"></div></aside></div></main>\
-         <div id=\"bar\"><div id=\"now\"><b id=\"nt\">Nothing playing</b><span id=\"nc\"></span></div>\
+         <div id=\"bar\"><div id=\"now\"><b id=\"nt\">Nothing playing</b><span id=\"nc\"></span></div><button id=\"lk\" class=\"ib\" hidden>\u{2661}</button>\
          <div id=\"ctl\"><button id=\"pv\" class=\"ib\" title=\"Previous\">\u{23EE}</button>\
          <button id=\"pp\" title=\"Play or pause\">\u{25B6}</button>\
          <button id=\"nx\" class=\"ib\" title=\"Next\">\u{23ED}</button></div>\
@@ -697,8 +900,52 @@ mod tests {
     }
 
     #[test]
+    fn shuffle_keeps_the_playing_song_and_everything_before_it() {
+        let mut q = queue_of(8);
+        q.set_current(2);
+        let before = q.tracks.clone();
+        q.shuffle(12345);
+        assert_eq!(&q.tracks[..3], &before[..3]);
+        assert_eq!(q.cur, Some(2));
+        let mut a: Vec<_> = q.tracks.iter().map(|t| t.id.clone()).collect();
+        let mut b: Vec<_> = before.iter().map(|t| t.id.clone()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_ne!(q.tracks, before);
+        let mut empty = Queue::default();
+        empty.shuffle(1);
+        let mut one = queue_of(1);
+        one.shuffle(1);
+    }
+
+    #[test]
+    fn liked_songs_and_playlists() {
+        let mut lib = Library::default();
+        assert!(lib.toggle_like(track("AAAAAAAAAA1")));
+        assert!(lib.toggle_like(track("AAAAAAAAAA2")));
+        assert_eq!(lib.liked[0].id, "AAAAAAAAAA2");
+        assert!(!lib.toggle_like(track("AAAAAAAAAA1")));
+        assert_eq!(lib.liked.len(), 1);
+        assert!(!lib.save_list("", vec![track("AAAAAAAAAA1")]));
+        assert!(!lib.save_list("x", vec![]));
+        assert!(lib.save_list(" Mix ", vec![track("AAAAAAAAAA1")]));
+        assert!(lib.save_list("Mix", vec![track("AAAAAAAAAA3"), track("AAAAAAAAAA4")]));
+        assert_eq!(lib.lists.len(), 1);
+        assert_eq!(lib.lists[0].1.len(), 2);
+        let back = Library::from_json(&lib.to_json().to_string());
+        assert_eq!(back, lib);
+        lib.delete_list("Mix");
+        assert!(lib.lists.is_empty());
+        let junk = Library::from_json(r#"{"liked":[{"id":"bad"},5],"lists":[{"name":"","tracks":[]},{"name":"a","tracks":[{"id":"zzzzzzzzzzz"}]}]}"#);
+        assert!(junk.liked.is_empty());
+        assert_eq!(junk.lists.len(), 1);
+        assert!(Library::from_json("garbage").liked.is_empty());
+    }
+
+    #[test]
     fn commands_reject_bad_input() {
-        for bad in ["nonsense", "rm:abc", "cur:-1", "repeat:7", "vol:2", "add:{}", "add:{\"id\":\"x\"}", "track:../../x"] {
+        for bad in ["nonsense", "rm:abc", "cur:-1", "repeat:7", "vol:2", "add:{}", "add:{\"id\":\"x\"}", "track:../../x", "like:{}", "like:nope"] {
             assert!(command(bad).contains("\"error\""), "{bad}");
         }
     }
@@ -727,7 +974,7 @@ mod tests {
     #[test]
     fn the_page_has_what_the_script_needs() {
         let html = page_html();
-        for id in ["sf", "qi", "res", "more", "q", "qn", "rep", "clr", "pp", "pv", "nx", "seek", "tm", "vol", "nt", "nc", "lt", "msg", "a"] {
+        for id in ["sh", "lib", "lk", "pn", "ps", "sf", "qi", "res", "more", "q", "qn", "rep", "clr", "pp", "pv", "nx", "seek", "tm", "vol", "nt", "nc", "lt", "msg", "a"] {
             assert!(html.contains(&format!("id=\"{id}\"")), "missing id {id}");
         }
     }

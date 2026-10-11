@@ -227,6 +227,183 @@ fn player_dir() -> Option<PathBuf> {
 }
 
 
+// ---------------------------------------------------------------- watch later, history, resume
+
+const MAX_LATER: usize = 300;
+const MAX_HISTORY: usize = 150;
+const MAX_POSITIONS: usize = 300;
+
+/// What Plume remembers: a watch-later list, recently watched videos and where you stopped.
+#[derive(Debug, Default, PartialEq)]
+struct Store {
+    later: Vec<VideoItem>,
+    history: Vec<VideoItem>,
+    positions: Vec<(String, u64)>,
+}
+
+fn clean(text: &str, max: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
+}
+
+fn item_from_json(v: &serde_json::Value) -> Option<VideoItem> {
+    let id = v.get("id")?.as_str()?;
+    if !valid_video_id(id) {
+        return None;
+    }
+    let text = |key: &str, max: usize| clean(v.get(key).and_then(|t| t.as_str()).unwrap_or(""), max);
+    Some(VideoItem {
+        id: id.to_string(),
+        title: text("title", 200),
+        channel: text("channel", 120),
+        duration_secs: v.get("duration").and_then(|d| d.as_u64()).filter(|d| *d > 0).map(|d| d.min(100 * 3600)),
+        views: String::new(),
+        published: String::new(),
+    })
+}
+
+fn item_to_json(item: &VideoItem) -> serde_json::Value {
+    serde_json::json!({"id": item.id, "title": item.title, "channel": item.channel, "duration": item.duration_secs.unwrap_or(0)})
+}
+
+impl Store {
+    /// Saves the video for later, or takes it off the list. Returns whether it is saved now.
+    fn toggle_later(&mut self, item: VideoItem) -> bool {
+        if let Some(i) = self.later.iter().position(|v| v.id == item.id) {
+            self.later.remove(i);
+            return false;
+        }
+        self.later.insert(0, item);
+        self.later.truncate(MAX_LATER);
+        true
+    }
+
+    fn add_history(&mut self, item: VideoItem) {
+        self.history.retain(|v| v.id != item.id);
+        self.history.insert(0, item);
+        self.history.truncate(MAX_HISTORY);
+    }
+
+    /// Remembers where the video was stopped (nothing is kept for the first seconds).
+    fn set_position(&mut self, id: &str, secs: u64) {
+        self.positions.retain(|(v, _)| v != id);
+        if secs >= 15 {
+            self.positions.push((id.to_string(), secs));
+            if self.positions.len() > MAX_POSITIONS {
+                self.positions.remove(0);
+            }
+        }
+    }
+
+    fn position(&self, id: &str) -> u64 {
+        self.positions.iter().find(|(v, _)| v == id).map(|(_, s)| *s).unwrap_or(0)
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "later": self.later.iter().map(item_to_json).collect::<Vec<_>>(),
+            "history": self.history.iter().map(item_to_json).collect::<Vec<_>>(),
+            "positions": self.positions.iter().map(|(v, s)| serde_json::json!([v, s])).collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    fn from_json(text: &str) -> Store {
+        let v: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+        let items = |key: &str, max: usize| -> Vec<VideoItem> {
+            v.get(key)
+                .and_then(|l| l.as_array())
+                .map(|l| l.iter().filter_map(item_from_json).take(max).collect())
+                .unwrap_or_default()
+        };
+        Store {
+            later: items("later", MAX_LATER),
+            history: items("history", MAX_HISTORY),
+            positions: v
+                .get("positions")
+                .and_then(|l| l.as_array())
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|p| {
+                            let id = p.get(0)?.as_str()?;
+                            valid_video_id(id).then(|| (id.to_string(), p.get(1).and_then(|s| s.as_u64()).unwrap_or(0)))
+                        })
+                        .take(MAX_POSITIONS)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+static STORE: Mutex<Option<Store>> = Mutex::new(None);
+
+fn store_file() -> Option<PathBuf> {
+    base_dir().map(|dir| dir.join("plume.json"))
+}
+
+fn with_store<T>(change: impl FnOnce(&mut Store) -> T, save: bool) -> T {
+    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(
+            store_file()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|t| Store::from_json(&t))
+                .unwrap_or_default(),
+        );
+    }
+    let store = guard.as_mut().expect("store was just made");
+    let result = change(store);
+    if save && let Some(file) = store_file() {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, store.to_json());
+    }
+    result
+}
+
+/// The player page's requests about the lists (`later:`, `hist:`, `pos:`, `clear:`).
+fn store_command(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("later:") {
+        if let Some(id) = rest.strip_prefix("has:") {
+            let saved = with_store(|s| s.later.iter().any(|v| v.id == id), false);
+            return if saved { "1" } else { "0" }.into();
+        }
+        if let Some(id) = rest.strip_prefix("rm:") {
+            with_store(|s| s.later.retain(|v| v.id != id), true);
+            return "0".into();
+        }
+        return match serde_json::from_str(rest).ok().as_ref().and_then(item_from_json) {
+            Some(item) => if with_store(|s| s.toggle_later(item), true) { "1" } else { "0" }.into(),
+            None => String::new(),
+        };
+    }
+    if let Some(rest) = value.strip_prefix("hist:") {
+        if let Some(item) = serde_json::from_str(rest).ok().as_ref().and_then(item_from_json) {
+            with_store(|s| s.add_history(item), true);
+        }
+        return String::new();
+    }
+    if let Some(rest) = value.strip_prefix("pos:") {
+        if let Some(id) = rest.strip_prefix("get:") {
+            return with_store(|s| s.position(id), false).to_string();
+        }
+        if let Some((id, secs)) = rest.split_once(',') &&
+            valid_video_id(id) &&
+            let Ok(secs) = secs.parse::<u64>()
+        {
+            with_store(|s| s.set_position(id, secs.min(100 * 3600)), true);
+        }
+        return String::new();
+    }
+    match value {
+        "clear:history" => with_store(|s| s.history.clear(), true),
+        "clear:later" => with_store(|s| s.later.clear(), true),
+        _ => {},
+    }
+    String::new()
+}
+
 /// Volume the player used last time: "get" returns `volume,muted` (for example `0.40,0`);
 /// anything else of that shape is saved.
 pub(crate) fn player_memory(value: &str) -> String {
@@ -234,6 +411,9 @@ pub(crate) fn player_memory(value: &str) -> String {
         let note: String = note.chars().filter(|c| !c.is_control()).take(120).collect();
         crate::crashlog::note(&format!("player: {note}"));
         return String::new();
+    }
+    if value.starts_with("later:") || value.starts_with("hist:") || value.starts_with("pos:") || value.starts_with("clear:") {
+        return store_command(value);
     }
     let Some(file) = player_dir().map(|d| d.join("volume.txt")) else { return String::new() };
     if value == "get" {
@@ -371,6 +551,22 @@ a.vid{color:var(--fg);text-decoration:none;display:block}
 #cs .more{margin:14px 0 0}
 button.more{display:block;margin:26px auto 0;font:inherit;padding:9px 26px;border-radius:999px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer}
 button.more:hover{border-color:var(--gold)}
+header{background:linear-gradient(180deg,rgba(214,170,72,.10),transparent 120%),var(--bg)}
+.search input:focus{outline:0;border-color:var(--gold);box-shadow:0 0 0 3px rgba(214,170,72,.22)}
+.thumb{transition:box-shadow .15s,transform .15s}
+.thumb img{opacity:0;transition:opacity .25s}
+.thumb img.ok{opacity:1}
+a.vid:hover .thumb{box-shadow:0 8px 20px rgba(0,0,0,.32);transform:translateY(-2px)}
+a.vid:hover .vt{color:var(--gold)}
+.dur{backdrop-filter:none}
+.watch.theater{grid-template-columns:minmax(0,1fr)}
+.watch.theater video{max-height:84vh}
+.sec{display:flex;align-items:center;gap:12px;margin:26px 0 12px}
+.sec h2{margin:0}
+.sc{position:relative}
+.rmv{position:absolute;top:6px;left:6px;z-index:2;width:26px;height:26px;border-radius:50%;border:0;background:rgba(0,0,0,.72);color:#fff;font-size:16px;line-height:1;cursor:pointer;opacity:0;transition:opacity .12s}
+.sc:hover .rmv{opacity:1}
+#rs{margin:8px 0;display:flex;gap:8px;align-items:center}
 .hero{text-align:center;margin-top:14vh}
 .hero h1{font-size:42px;font-weight:500;letter-spacing:1px;margin:0}
 .hero svg{width:60px;height:60px}
@@ -406,7 +602,7 @@ i.addEventListener('blur',function(){setTimeout(hide,150);});})();";
 const LAZY_JS: &str = r#"(function(){var pending=false;
 function run(){pending=false;var h=window.innerHeight||800,imgs=document.querySelectorAll('img[data-src]');
 for(var i=0;i<imgs.length;i++){var im=imgs[i],r=im.getBoundingClientRect(),near=r.bottom>-1500&&r.top<h+1500;
-if(near){if(!im.getAttribute('src'))im.setAttribute('src',im.getAttribute('data-src'));}
+if(near){if(!im.getAttribute('src')){im.onload=function(){this.className='ok';};im.setAttribute('src',im.getAttribute('data-src'));}}
 else if(im.getAttribute('src')){im.removeAttribute('src');}}
 var b=document.getElementById('m');
 if(b&&!b.disabled&&b.style.display!=='none'&&b.getBoundingClientRect().top<h+900)b.click();}
@@ -754,14 +950,56 @@ fn results_html(request: &Request, heading: &str, items: &[VideoItem], next: Opt
     page_with(heading, query, false, &body, false)
 }
 
+/// One of the home page's lists: a heading, a "clear" button and the saved videos.
+fn saved_section(title: &str, kind: &str, items: &[VideoItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let cards: String = items
+        .iter()
+        .take(48)
+        .map(|item| {
+            let remove = if kind == "later" {
+                format!("<button type=\"button\" class=\"rmv\" title=\"Remove\" data-id=\"{}\">&times;</button>", esc(&item.id))
+            } else {
+                String::new()
+            };
+            format!("<div class=\"sc\">{remove}{}</div>", card(item))
+        })
+        .collect();
+    format!(
+        "<div class=\"sec\" id=\"s-{kind}\"><h2>{title}</h2><button type=\"button\" class=\"qbtn\" data-clear=\"{kind}\">Clear</button></div>\
+         <div class=\"grid\" id=\"g-{kind}\">{cards}</div>"
+    )
+}
+
 fn home_html() -> String {
+    let (later, history) = with_store(|s| (s.later.clone(), s.history.clone()), false);
+    let memory = streamproxy::global().map(|p| p.memory_url()).unwrap_or_default();
+    let sections = format!(
+        "{}{}",
+        saved_section("Watch later", "later", &later),
+        saved_section("Recently watched", "history", &history)
+    );
+    let script = if sections.is_empty() || memory.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<script>(function(){{var M='{memory}';function mem(p){{var x=new XMLHttpRequest();x.open('GET',M+'?p='+encodeURIComponent(p));x.send();}}\
+             document.addEventListener('click',function(e){{var t=e.target;\
+             if(t.getAttribute&&t.getAttribute('data-clear')){{var k=t.getAttribute('data-clear');mem('clear:'+k);\
+             var a=document.getElementById('s-'+k),b=document.getElementById('g-'+k);if(a)a.remove();if(b)b.remove();}}\
+             else if(t.className==='rmv'){{e.preventDefault();e.stopPropagation();mem('later:rm:'+t.getAttribute('data-id'));t.parentNode.remove();}}}},true);}})();</script>"
+        )
+    };
     page_with(
         "YouTube",
         "",
         true,
         &format!(
-            "<div class=\"hero\">{FEATHER}<h1>Plume</h1>\
-             <p>YouTube without the clutter. Search above, or paste a video link into the address bar.</p></div>"
+            "<div class=\"hero\" style=\"margin-top:{}\">{FEATHER}<h1>Plume</h1>\
+             <p>YouTube without the clutter. Search above, or paste a video link into the address bar.</p></div>{sections}{script}",
+            if sections.is_empty() { "14vh" } else { "5vh" }
         ),
         false,
     )
@@ -902,6 +1140,50 @@ function qdraw(){
 qb.onclick=function(x){x.stopPropagation();qm.style.display=qm.style.display==='none'?'block':'none';};
 document.addEventListener('click',function(){qm.style.display='none';});
 qdraw();
+// ---- Pteron: speed, theater mode, watch later, history and resume
+var rate=1,told=false;
+function mem(p,cb){if(!MEM){if(cb)cb('');return;}var x=new XMLHttpRequest();x.open('GET',MEM+'?p='+encodeURIComponent(p));x.onload=function(){if(cb)cb(x.responseText);};x.onerror=function(){if(cb)cb('');};x.send();}
+function clock(s){s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60,h=Math.floor(m/60);m=m%60;return h?h+':'+(m<10?'0':'')+m+':'+(r<10?'0':'')+r:m+':'+(r<10?'0':'')+r;}
+var sb=document.getElementById('sb'),sm=document.getElementById('sm'),RATES=[0.5,0.75,1,1.25,1.5,1.75,2];
+function setRate(r){rate=r;try{cur().playbackRate=r;}catch(x){}sb.textContent=(r===1?'1x':r+'x')+' \u25BE';sm.innerHTML='';
+  RATES.forEach(function(v){var d=document.createElement('div');d.className='qi'+(v===r?' on':'');d.textContent=v===1?'Normal':v+'x';d.onclick=function(x){x.stopPropagation();sm.style.display='none';setRate(v);};sm.appendChild(d);});}
+function stepRate(k){var i=RATES.indexOf(rate)+k;if(i>=0&&i<RATES.length)setRate(RATES[i]);}
+sb.onclick=function(x){x.stopPropagation();qm.style.display='none';sm.style.display=sm.style.display==='none'?'block':'none';};
+document.addEventListener('click',function(){sm.style.display='none';});
+setRate(1);
+var th=document.getElementById('th'),wrap=document.querySelector('.watch');
+function toggleTheater(){var on=wrap.className.indexOf('theater')<0;wrap.className=on?'watch theater':'watch';th.textContent=on?'Normal view':'Theater';}
+th.onclick=toggleTheater;
+var wl=document.getElementById('wl');
+function wlPaint(on){wl.textContent=on?'Saved \u2713':'Watch later';}
+wl.onclick=function(){mem('later:'+JSON.stringify(VID),function(r){wlPaint(r==='1');});};
+mem('later:has:'+VID.id,function(r){wlPaint(r==='1');});
+var rs=document.getElementById('rs'),rsb=document.getElementById('rsb');
+mem('pos:get:'+VID.id,function(r){var s=parseInt(r,10);
+  if(s>=15&&(!VID.duration||s<VID.duration-20)){rs.style.display='flex';rsb.textContent='Resume from '+clock(s);
+    rsb.onclick=function(){try{cur().currentTime=s;cur().play();}catch(x){}rs.style.display='none';};
+    document.getElementById('rso').onclick=function(){rs.style.display='none';};
+    setTimeout(function(){rs.style.display='none';},20000);}});
+function track(v){
+  v.playbackRate=rate;
+  v.addEventListener('loadedmetadata',function(){v.playbackRate=rate;});
+  v.addEventListener('playing',function(){if(!told){told=true;mem('hist:'+JSON.stringify(VID));}});
+  var last=0;
+  v.addEventListener('timeupdate',function(){var n=Date.now();if(n-last<5000)return;last=n;if(v.currentTime>=15)mem('pos:'+VID.id+','+Math.floor(v.currentTime));});
+  v.addEventListener('ended',function(){mem('pos:'+VID.id+',0');});
+}
+var hookBase=hook;
+hook=function(v){hookBase(v);track(v);};
+document.addEventListener('keydown',function(x){
+  var t=x.target&&x.target.tagName;if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||x.ctrlKey||x.altKey||x.metaKey)return;
+  var v=cur();
+  if(x.key==='j'){v.currentTime=Math.max(0,v.currentTime-10);}
+  else if(x.key==='l'){v.currentTime=Math.min(v.duration||1e9,v.currentTime+10);}
+  else if(x.key==='t'){toggleTheater();}
+  else if(x.key==='>'){stepRate(1);}
+  else if(x.key==='<'){stepRate(-1);}
+  else if(/^[0-9]$/.test(x.key)&&v.duration){v.currentTime=v.duration*parseInt(x.key,10)/10;}
+});
 hook(cur());
 if(MEM){var mx=new XMLHttpRequest();mx.open('GET',MEM+'?p=get');mx.onload=function(){
   var s=(mx.responseText||'').split(',');var vol=parseFloat(s[0]);
@@ -970,7 +1252,20 @@ fn player_html(id: &str, info: &innertube::PlayerInfo, choices: &[Choice], relat
     };
     let full_endpoint = streamproxy::global().map(|p| p.full_url()).unwrap_or_default();
     let memory_endpoint = streamproxy::global().map(|p| p.memory_url()).unwrap_or_default();
-    let script = PLAYER_JS.replace("@FULL@", &full_endpoint).replace("@MEM@", &memory_endpoint);
+    let vid = serde_json::to_string(&item_to_json(&VideoItem {
+        id: id.to_string(),
+        title: title.to_string(),
+        channel: info.author.clone(),
+        duration_secs: Some(info.duration_secs),
+        views: String::new(),
+        published: String::new(),
+    }))
+    .unwrap_or_else(|_| "{}".into())
+    .replace('<', "\\u003c");
+    let script = format!(
+        "var VID={vid};{}",
+        PLAYER_JS.replace("@FULL@", &full_endpoint).replace("@MEM@", &memory_endpoint)
+    );
     let comments_endpoint = streamproxy::global().map(|p| p.comments_url()).unwrap_or_default();
     let comments_block = format!(
         "<div id=\"cs\"><button class=\"more\" id=\"cb\" data-t=\"{id}\">Show comments</button>\
@@ -989,9 +1284,13 @@ fn player_html(id: &str, info: &innertube::PlayerInfo, choices: &[Choice], relat
     let body = format!(
         "<div class=\"watch\"><div><video id=\"v\" controls autoplay data-duration=\"{}\"{partial_attr}{poster} src=\"{}\"></video>\
          <p id=\"e\" class=\"err\" style=\"display:none\"></p>\
+         <div id=\"rs\" style=\"display:none\"><button type=\"button\" id=\"rsb\" class=\"qbtn\"></button><button type=\"button\" id=\"rso\" class=\"qbtn\">Start over</button></div>\
          <h1>{}</h1>\
          <div class=\"row\">{author}<span class=\"meta\">{}</span><span class=\"sp\"></span>\
-         <div class=\"pick qwrap\"><span id=\"res\" class=\"meta\"></span><span>Quality</span><button type=\"button\" id=\"qb\" class=\"qbtn\"></button>\
+         <button type=\"button\" id=\"wl\" class=\"qbtn\">Watch later</button><button type=\"button\" id=\"th\" class=\"qbtn\">Theater</button>\
+         <div class=\"pick qwrap\"><span id=\"res\" class=\"meta\"></span><span>Speed</span><button type=\"button\" id=\"sb\" class=\"qbtn\"></button>\
+         <div id=\"sm\" class=\"qmenu\" style=\"display:none\"></div>\
+         <span>Quality</span><button type=\"button\" id=\"qb\" class=\"qbtn\"></button>\
          <div id=\"qm\" class=\"qmenu\" style=\"display:none\"></div><select id=\"q\" style=\"display:none\">{options}</select></div>\
          <a class=\"plain\" href=\"{}#{FRAGMENT_DIRECT}\">Open on YouTube</a></div>\
          {description_block}{comments_block}</div>{next}</div>\
@@ -1180,6 +1479,49 @@ mod tests {
 
     fn video(id: &str) -> Option<Action> {
         Some(Action::Open(Request::Video(id.into())))
+    }
+
+    #[test]
+    fn watch_later_history_and_resume() {
+        let item = |id: &str| VideoItem {
+            id: id.into(), title: "T".into(), channel: "C".into(), duration_secs: Some(60), views: String::new(), published: String::new(),
+        };
+        let mut s = Store::default();
+        assert!(s.toggle_later(item("aaaaaaaaaaa")));
+        assert!(s.toggle_later(item("bbbbbbbbbbb")));
+        assert_eq!(s.later[0].id, "bbbbbbbbbbb");
+        assert!(!s.toggle_later(item("aaaaaaaaaaa")));
+        assert_eq!(s.later.len(), 1);
+        s.add_history(item("aaaaaaaaaaa"));
+        s.add_history(item("bbbbbbbbbbb"));
+        s.add_history(item("aaaaaaaaaaa"));
+        assert_eq!(s.history.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["aaaaaaaaaaa", "bbbbbbbbbbb"]);
+        for i in 0..200 {
+            s.add_history(item(&format!("{i:011}")));
+        }
+        assert_eq!(s.history.len(), MAX_HISTORY);
+        s.set_position("aaaaaaaaaaa", 120);
+        s.set_position("bbbbbbbbbbb", 5);
+        assert_eq!((s.position("aaaaaaaaaaa"), s.position("bbbbbbbbbbb")), (120, 0));
+        s.set_position("aaaaaaaaaaa", 0);
+        assert_eq!(s.position("aaaaaaaaaaa"), 0);
+        s.set_position("ccccccccccc", 99);
+        let back = Store::from_json(&s.to_json());
+        assert_eq!(back, s);
+        assert_eq!(Store::from_json("nonsense"), Store::default());
+        let junk = Store::from_json(r#"{"later":[{"id":"bad"},{"id":"ddddddddddd","title":"x\u0007y"}],"positions":[["zz",5],["eeeeeeeeeee",7]]}"#);
+        assert_eq!(junk.later.len(), 1);
+        assert_eq!(junk.later[0].title, "xy");
+        assert_eq!(junk.positions, vec![("eeeeeeeeeee".to_string(), 7)]);
+    }
+
+    #[test]
+    fn saved_lists_render_and_escape() {
+        let items = vec![VideoItem { id: "aaaaaaaaaaa".into(), title: "<i>x</i>".into(), channel: String::new(), duration_secs: None, views: String::new(), published: String::new() }];
+        let html = saved_section("Watch later", "later", &items);
+        assert!(html.contains("&lt;i&gt;x") && html.contains("data-clear=\"later\"") && html.contains("class=\"rmv\""));
+        assert!(!saved_section("Recently watched", "history", &items).contains("rmv"));
+        assert_eq!(saved_section("x", "later", &[]), "");
     }
 
     #[test]

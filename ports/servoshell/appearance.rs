@@ -23,6 +23,22 @@ pub(crate) const PRESETS: [(&str, &str, [u8; 3]); 6] = [
 /// Biggest picture accepted for the new tab page (it is placed inside the page).
 pub(crate) const MAX_PICTURE_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Softer corners and quicker fades for every look.
+pub(crate) fn polish_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        let widget = egui::CornerRadius::same(8);
+        style.visuals.widgets.noninteractive.corner_radius = widget;
+        style.visuals.widgets.inactive.corner_radius = widget;
+        style.visuals.widgets.hovered.corner_radius = widget;
+        style.visuals.widgets.active.corner_radius = widget;
+        style.visuals.widgets.open.corner_radius = widget;
+        style.visuals.window_corner_radius = egui::CornerRadius::same(12);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
+        style.animation_time = 0.12;
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    });
+}
+
 pub(crate) fn parse_hex(text: &str) -> Option<[u8; 3]> {
     let text = text.trim().trim_start_matches('#');
     if text.len() != 6 || !text.is_ascii() {
