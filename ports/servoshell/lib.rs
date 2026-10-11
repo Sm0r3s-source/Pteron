@@ -34,6 +34,7 @@ mod music;
 mod reader;
 mod report;
 mod passwords;
+mod compat;
 mod secure;
 mod sitecheck;
 mod sync;

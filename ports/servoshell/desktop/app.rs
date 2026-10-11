@@ -154,6 +154,11 @@ impl App {
             None,
         )));
 
+        user_content_manager.add_script(Rc::new(UserScript::new(
+            crate::compat::SCRIPT.to_string(),
+            None,
+        )));
+
         for user_stylesheet in &self.servoshell_preferences.user_stylesheets {
             user_content_manager.add_stylesheet(user_stylesheet.clone());
         }
