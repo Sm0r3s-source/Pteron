@@ -81,12 +81,25 @@ pub(crate) fn host_is_listed(host: &str) -> bool {
     }
 }
 
+fn is_one_tap(url: &url::Url) -> bool {
+    url.host_str() == Some("accounts.google.com") && url.path().starts_with("/gsi/iframe/select")
+}
+
 /// Should this request be cancelled? Pages themselves are never blocked.
 pub(crate) fn should_block(url: &url::Url, is_main_frame: bool) -> bool {
-    if is_main_frame || !ENABLED.load(Ordering::Relaxed) {
+    if is_main_frame {
         return false;
     }
     if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    // Not about ads: Google's "sign in with Google" pop-up frame (One Tap) makes Servo's
+    // script engine panic (a frame inside a frame in another thread), so it is never loaded,
+    // even with the ad blocker off. The normal sign-in button and e-mail login still work.
+    if is_one_tap(url) {
+        return true;
+    }
+    if !ENABLED.load(Ordering::Relaxed) {
         return false;
     }
     url.host_str().is_some_and(host_is_listed)
@@ -127,6 +140,17 @@ mod tests {
         assert!(!blocked("https://doubleclick.net/x.js"));
         set_enabled(true);
         assert!(blocked("https://doubleclick.net/x.js"));
+    }
+
+    #[test]
+    fn google_one_tap_frame_is_always_blocked() {
+        let one_tap = |u: &str| is_one_tap(&url::Url::parse(u).unwrap());
+        assert!(one_tap("https://accounts.google.com/gsi/iframe/select?client_id=x"));
+        assert!(!one_tap("https://accounts.google.com/gsi/button?x=1"));
+        assert!(!one_tap("https://accounts.google.com/o/oauth2/auth"));
+        assert!(!one_tap("https://example.com/gsi/iframe/select"));
+        // The page itself is never blocked.
+        assert!(!should_block(&url::Url::parse("https://accounts.google.com/gsi/iframe/select").unwrap(), true));
     }
 
     #[test]
