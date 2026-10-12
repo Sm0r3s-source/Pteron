@@ -35,6 +35,7 @@ mod reader;
 mod report;
 mod passwords;
 mod compat;
+mod memsaver;
 mod secure;
 mod sitecheck;
 mod sync;

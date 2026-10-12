@@ -1,6 +1,6 @@
 ﻿# Pteron
 
-A small, low-memory, general-purpose web browser for Windows, built on the [Servo](https://servo.org) engine (v0.7.0) in Rust. Current build: **53**.
+A small, low-memory, general-purpose web browser for Windows, built on the [Servo](https://servo.org) engine (v0.7.0) in Rust. Current build: **54**.
 
 Pteron is a young prototype. It aims to use little RAM and keep the interface simple: a sidebar with tabs, bookmarks and settings, and a page area that gets the rest of the window. Many modern sites work; some look wrong or do not work yet (see Known problems).
 

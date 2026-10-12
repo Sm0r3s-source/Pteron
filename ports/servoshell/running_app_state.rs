@@ -169,6 +169,7 @@ impl WebViewCollection {
             "focus: window focus = {focused}, active tab present = {}",
             self.active().is_some()
         ));
+        crate::memsaver::note_focus(focused);
         self.has_system_focus = focused;
         if let Some(active) = self.active() {
             active.set_focused(focused);

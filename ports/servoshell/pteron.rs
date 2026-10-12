@@ -74,6 +74,8 @@ pub(crate) struct Settings {
     pub newtab_color: String,
     /// Ids from `compat::FEATURES` that are switched on (newer web features, off by default).
     pub compat: Vec<String>,
+    /// Memory saver level: "normal", "low" or "lowest" (see `memsaver`).
+    pub memory_mode: String,
 }
 
 impl Default for Settings {
@@ -102,6 +104,7 @@ impl Default for Settings {
             newtab_bg: "theme".to_string(),
             newtab_color: "#1b1c1e".to_string(),
             compat: Vec::new(),
+            memory_mode: "normal".to_string(),
         }
     }
 }
@@ -176,6 +179,9 @@ pub(crate) fn apply_json(settings: &mut Settings, value: &serde_json::Value) {
             list.iter().filter_map(|item| item.as_str().map(str::to_string)),
         );
     }
+    if let Some(mode) = value.get("memory_mode").and_then(|v| v.as_str()) {
+        settings.memory_mode = crate::memsaver::Level::from_id(mode).id().to_string();
+    }
     if let Some(enabled) = value.get("adblock").and_then(|v| v.as_bool()) {
         settings.adblock = enabled;
     }
@@ -231,6 +237,7 @@ fn store() -> &'static RwLock<Settings> {
     STORE.get_or_init(|| {
         let loaded = load_from_disk();
         crate::adblock::set_enabled(loaded.adblock);
+        crate::memsaver::set_level(crate::memsaver::Level::from_id(&loaded.memory_mode));
         RwLock::new(loaded)
     })
 }
@@ -248,6 +255,7 @@ pub(crate) fn tab_sleep_minutes() -> u32 {
 /// Replace the settings and save them to disk.
 pub(crate) fn update(new_settings: Settings) {
     crate::adblock::set_enabled(new_settings.adblock);
+    crate::memsaver::set_level(crate::memsaver::Level::from_id(&new_settings.memory_mode));
     crate::sync::changed_soon();
     if let Ok(mut current) = store().write() {
         *current = new_settings.clone();
@@ -282,6 +290,7 @@ pub(crate) fn update(new_settings: Settings) {
         "newtab_bg": new_settings.newtab_bg,
         "newtab_color": new_settings.newtab_color,
         "compat": new_settings.compat,
+        "memory_mode": new_settings.memory_mode,
     });
     if let Err(error) = std::fs::write(&path, json.to_string()) {
         warn!("Could not save {}: {error}", path.display());
@@ -695,6 +704,21 @@ box.style.setProperty('display','none','important');
 }catch(e){}},250);
 }catch(e){}},true);
 }catch(e){}})();"#;
+
+#[cfg(test)]
+mod memory_mode_tests {
+    use super::*;
+
+    #[test]
+    fn memory_mode_is_read_and_validated() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.memory_mode, "normal");
+        apply_json(&mut settings, &serde_json::json!({ "memory_mode": "lowest" }));
+        assert_eq!(settings.memory_mode, "lowest");
+        apply_json(&mut settings, &serde_json::json!({ "memory_mode": "nonsense" }));
+        assert_eq!(settings.memory_mode, "normal");
+    }
+}
 
 #[cfg(test)]
 mod compat_setting_tests {

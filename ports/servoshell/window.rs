@@ -47,7 +47,9 @@ pub(crate) fn tab_sleep_timeout() -> Option<Duration> {
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
     });
-    let secs = env_secs.unwrap_or_else(|| u64::from(crate::pteron::tab_sleep_minutes()) * 60);
+    let secs = env_secs.unwrap_or_else(|| {
+        crate::memsaver::tab_sleep_secs(u64::from(crate::pteron::tab_sleep_minutes()) * 60)
+    });
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
@@ -489,6 +491,7 @@ impl ServoShellWindow {
     /// Pteron: runs once per event-loop spin. Wakes a tab if none is left open and puts
     /// long-idle background tabs to sleep.
     fn maintain_tabs(self: &Rc<Self>, state: &Rc<RunningAppState>) {
+        crate::memsaver::set_tabs(self.webviews().len());
         self.save_session();
         crate::library::flush();
 

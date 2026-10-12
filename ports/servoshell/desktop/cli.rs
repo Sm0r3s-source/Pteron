@@ -51,6 +51,7 @@ pub fn main() {
 
     crate::init_tracing(servoshell_preferences.tracing_filter.as_deref());
     crate::crashlog::begin_session();
+    crate::memsaver::start_logger();
 
     let clean_shutdown = servoshell_preferences.clean_shutdown;
     let event_loop = match servoshell_preferences.headless {

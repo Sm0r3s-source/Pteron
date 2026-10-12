@@ -720,6 +720,56 @@ fn tabs_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
             }
         },
     );
+    changed |= memory_card(ui, settings);
+    changed
+}
+
+fn memory_card(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
+    let mut changed = false;
+    card(
+        ui,
+        "Memory saver",
+        Some(
+            "For older or low-memory computers. Pteron uses less memory, but some things get \
+             slower: videos buffer less and may pause on a slow connection, background tabs \
+             sleep sooner and reload when you come back, and pages may load a little slower. \
+             Changing the level needs a restart of Pteron.",
+        ),
+        "memory saver low ram reduce usage old slow computer",
+        |ui| {
+            changed |= radio(
+                ui,
+                &mut settings.memory_mode,
+                "normal",
+                "Normal",
+                Some("Best speed. Nothing is held back."),
+            );
+            changed |= radio(
+                ui,
+                &mut settings.memory_mode,
+                "low",
+                "Low memory",
+                Some(
+                    "Smaller video buffer, background tabs sleep after 3 minutes, memory is handed \
+                     back to Windows when Pteron is in the background, fewer helper threads.",
+                ),
+            );
+            changed |= radio(
+                ui,
+                &mut settings.memory_mode,
+                "lowest",
+                "Lowest memory",
+                Some(
+                    "Very small video buffer, tabs sleep after 1 minute, one page-layout thread, \
+                     small cache. Pages and videos start noticeably slower.",
+                ),
+            );
+            if let Some(mb) = crate::memsaver::process_mb() {
+                ui.add_space(6.0);
+                ui.label(format!("Pteron is using about {mb} MB right now."));
+            }
+        },
+    );
     changed
 }
 

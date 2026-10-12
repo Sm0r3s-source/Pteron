@@ -68,8 +68,6 @@ struct Net {
 }
 
 /// How far ahead of the player the helper downloads (it keeps this much in memory).
-const AHEAD_PIECES: usize = 5;
-const AHEAD_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One downloaded (or downloading) piece of the merged file.
 struct Slot {
@@ -132,11 +130,12 @@ impl Session {
     /// Keep downloading the pieces after `index` (up to a limit) and forget the ones the
     /// player has passed, so memory stays small.
     fn read_ahead(self: &Arc<Self>, index: usize) {
+        let (ahead_pieces, ahead_bytes) = crate::memsaver::read_ahead();
         let mut bytes = 0u64;
         let mut last = index;
-        for next in index + 1..self.layout.pieces.len().min(index + 1 + AHEAD_PIECES) {
+        for next in index + 1..self.layout.pieces.len().min(index + 1 + ahead_pieces) {
             bytes += self.layout.pieces[next].len;
-            if bytes > AHEAD_BYTES {
+            if bytes > ahead_bytes {
                 break;
             }
             self.start(next);
