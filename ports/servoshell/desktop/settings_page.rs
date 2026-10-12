@@ -393,6 +393,7 @@ fn search_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
             },
         );
     }
+    changed |= multi_search_card(ui, settings);
     let target = pteron::search_url_for(settings);
     card(
         ui,
@@ -401,6 +402,75 @@ fn search_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
         "search address url",
         |ui| {
             ui.label(RichText::new(target).small());
+        },
+    );
+    changed
+}
+
+fn multi_search_card(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
+    let mut changed = false;
+    card(
+        ui,
+        "Search several engines at once",
+        Some("Searches typed in the address bar go to more than one engine."),
+        "search several multiple engines at once compare merge tabs",
+        |ui| {
+            changed |= ui
+                .checkbox(&mut settings.multi_search, "Search several engines at once")
+                .changed();
+            if !settings.multi_search {
+                return;
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Warning: this opens more pages or makes more downloads, so it uses more memory \
+                     and data. Not recommended on low-memory computers.",
+                )
+                .small()
+                .color(Color32::from_rgb(214, 160, 60)),
+            );
+            ui.add_space(6.0);
+            changed |= radio(
+                ui,
+                &mut settings.multi_mode,
+                "tabs",
+                "One tab per engine",
+                Some("Every engine opens in its own tab. Uses the most memory (one extra tab per engine)."),
+            );
+            changed |= radio(
+                ui,
+                &mut settings.multi_mode,
+                "page",
+                "One merged results page",
+                Some(
+                    "Pteron reads the results of each engine and shows them in one list. Uses less \
+                     memory than tabs, but works for DuckDuckGo, Bing, Brave and SearXNG only. If an \
+                     engine changes its pages or blocks the request, it is shown as a link instead.",
+                ),
+            );
+            ui.add_space(6.0);
+            ui.label("Engines to use (pick 2 to 4):");
+            let mut options: Vec<(String, String)> = pteron::ENGINES
+                .iter()
+                .map(|(id, label, _)| (id.to_string(), label.to_string()))
+                .collect();
+            options.push((pteron::SEARXNG_ID.to_string(), "SearXNG (my own instance)".to_string()));
+            for (id, label) in options {
+                let mut on = settings.multi_engines.contains(&id);
+                let full = settings.multi_engines.len() >= crate::multisearch::MAX_ENGINES;
+                if ui.add_enabled(on || !full, egui::Checkbox::new(&mut on, label)).changed() {
+                    if on {
+                        settings.multi_engines.push(id);
+                    } else {
+                        settings.multi_engines.retain(|e| *e != id);
+                    }
+                    changed = true;
+                }
+            }
+            if settings.multi_engines.len() < 2 {
+                ui.label(RichText::new("Pick at least two engines, or searches use only the default engine.").small().weak());
+            }
         },
     );
     changed

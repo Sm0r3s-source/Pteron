@@ -641,6 +641,37 @@ impl ServoShellWindow {
             match event {
                 UserInterfaceCommand::Go(location) => {
                     self.set_needs_update();
+                    // Pteron: search several engines at once, when switched on in Settings.
+                    let normal = location_bar_input_to_url(&location, &crate::pteron::search_url());
+                    let intent = crate::multisearch::intent_for(
+                        &crate::pteron::settings(),
+                        &location,
+                        normal.as_ref().map(|url| url.as_str()),
+                    );
+                    match intent {
+                        Some(crate::multisearch::Intent::Tabs(urls)) => {
+                            let mut urls = urls.into_iter().filter_map(|u| Url::parse(&u).ok());
+                            if let (Some(first), Some(active)) = (urls.next(), self.active_webview()) {
+                                active.load(first);
+                                for url in urls {
+                                    self.create_toplevel_webview(
+                                        state.clone(),
+                                        TopLevelWebViewCreationRequest::WithUrl(url),
+                                    );
+                                }
+                                continue;
+                            }
+                        },
+                        Some(crate::multisearch::Intent::Page { query, engines }) => {
+                            if let (Some(page), Some(active)) =
+                                (crate::multisearch::start_page(&query, &engines), self.active_webview())
+                            {
+                                active.load(page);
+                                continue;
+                            }
+                        },
+                        None => {},
+                    }
                     let Some(url) = location_bar_input_to_url(
                         &location.clone(),
                         &crate::pteron::search_url(),

@@ -467,7 +467,7 @@ pub(crate) fn comments_json(video_or_token: &str) -> String {
     }
 }
 
-fn esc(text: &str) -> String {
+pub(crate) fn esc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -707,7 +707,7 @@ fn direct_link(request: &Request) -> String {
 
 /// The page shown while Pteron works. It asks the local helper whether the real page is ready
 /// and reloads exactly once when it is, so nothing flashes.
-fn loading_html(message: &str, key: &str) -> String {
+pub(crate) fn loading_html(message: &str, key: &str) -> String {
     let body = format!(
         "<div class=\"hero\"><div class=\"pulse\">{FEATHER}</div><h1 style=\"font-size:22px\">{}</h1>\
          <p>This takes a few seconds.</p></div>",
@@ -1394,7 +1394,7 @@ fn fetch(request: &Request) {
     write_page(&key, &html);
 }
 
-fn page_path(key: &str) -> Option<PathBuf> {
+pub(crate) fn page_path(key: &str) -> Option<PathBuf> {
     if !valid_key(key) {
         return None;
     }
@@ -1425,7 +1425,7 @@ fn remove_old_pages() {
     }
 }
 
-fn write_page(key: &str, html: &str) {
+pub(crate) fn write_page(key: &str, html: &str) {
     remove_old_pages();
     match page_path(key) {
         Some(path) => {
@@ -1437,7 +1437,7 @@ fn write_page(key: &str, html: &str) {
     }
 }
 
-fn spawn_job(key: &str, job: impl FnOnce() + Send + 'static) {
+pub(crate) fn spawn_job(key: &str, job: impl FnOnce() + Send + 'static) {
     if !begin_job(key) {
         return;
     }

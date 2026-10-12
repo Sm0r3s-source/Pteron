@@ -76,6 +76,12 @@ pub(crate) struct Settings {
     pub compat: Vec<String>,
     /// Memory saver level: "normal", "low" or "lowest" (see `memsaver`).
     pub memory_mode: String,
+    /// Search several engines at once from the address bar.
+    pub multi_search: bool,
+    /// "tabs" (one tab per engine) or "page" (one merged results page).
+    pub multi_mode: String,
+    /// Engine ids used for the multi-engine search.
+    pub multi_engines: Vec<String>,
 }
 
 impl Default for Settings {
@@ -105,6 +111,9 @@ impl Default for Settings {
             newtab_color: "#1b1c1e".to_string(),
             compat: Vec::new(),
             memory_mode: "normal".to_string(),
+            multi_search: false,
+            multi_mode: "tabs".to_string(),
+            multi_engines: vec!["duckduckgo".to_string(), "bing".to_string()],
         }
     }
 }
@@ -176,6 +185,17 @@ pub(crate) fn apply_json(settings: &mut Settings, value: &serde_json::Value) {
     }
     if let Some(list) = value.get("compat").and_then(|v| v.as_array()) {
         settings.compat = crate::compat::clean_ids(
+            list.iter().filter_map(|item| item.as_str().map(str::to_string)),
+        );
+    }
+    if let Some(enabled) = value.get("multi_search").and_then(|v| v.as_bool()) {
+        settings.multi_search = enabled;
+    }
+    if let Some(mode) = value.get("multi_mode").and_then(|v| v.as_str()) {
+        settings.multi_mode = if mode == "page" { "page" } else { "tabs" }.to_string();
+    }
+    if let Some(list) = value.get("multi_engines").and_then(|v| v.as_array()) {
+        settings.multi_engines = crate::multisearch::clean_engines(
             list.iter().filter_map(|item| item.as_str().map(str::to_string)),
         );
     }
@@ -291,6 +311,9 @@ pub(crate) fn update(new_settings: Settings) {
         "newtab_color": new_settings.newtab_color,
         "compat": new_settings.compat,
         "memory_mode": new_settings.memory_mode,
+        "multi_search": new_settings.multi_search,
+        "multi_mode": new_settings.multi_mode,
+        "multi_engines": new_settings.multi_engines,
     });
     if let Err(error) = std::fs::write(&path, json.to_string()) {
         warn!("Could not save {}: {error}", path.display());
@@ -717,6 +740,21 @@ mod memory_mode_tests {
         assert_eq!(settings.memory_mode, "lowest");
         apply_json(&mut settings, &serde_json::json!({ "memory_mode": "nonsense" }));
         assert_eq!(settings.memory_mode, "normal");
+    }
+
+    #[test]
+    fn multi_search_settings_are_read_and_cleaned() {
+        let mut settings = Settings::default();
+        assert!(!settings.multi_search);
+        let value = serde_json::json!({
+            "multi_search": true, "multi_mode": "page", "multi_engines": ["brave", "x", "brave", "bing"]
+        });
+        apply_json(&mut settings, &value);
+        assert!(settings.multi_search);
+        assert_eq!(settings.multi_mode, "page");
+        assert_eq!(settings.multi_engines, vec!["brave".to_string(), "bing".to_string()]);
+        apply_json(&mut settings, &serde_json::json!({ "multi_mode": "weird" }));
+        assert_eq!(settings.multi_mode, "tabs");
     }
 }
 

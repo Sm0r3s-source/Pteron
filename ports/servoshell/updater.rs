@@ -12,7 +12,7 @@ use crate::streamproxy::UPSTREAM_USER_AGENT;
 
 /// This program's own number. Every release is tagged `build-<number>`; a bigger number than
 /// this one means an update is available. (Raised with every update.)
-pub(crate) const BUILD: u32 = 54;
+pub(crate) const BUILD: u32 = 55;
 
 /// Where releases are published: `https://github.com/<REPO>/releases`.
 pub(crate) const REPO: &str = "Sm0r3s-source/pteron";
@@ -245,6 +245,35 @@ fn fetch_text(url: &str) -> Result<String, String> {
         });
     }
     Ok(text)
+}
+
+/// Fetches a web page with curl (used by the merged search page). `tag` keeps parallel
+/// downloads from using the same temporary files.
+pub(crate) fn fetch_html(url: &str, tag: &str) -> Result<String, String> {
+    let tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+    let dir = update_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let out = dir.join(format!("page-{tag}.out"));
+    let _ = std::fs::remove_file(&out);
+    let agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
+    let status = with_curl(|mut command| {
+        command
+            .args(["-sS", "--fail", "-L", "--proto", "=https", "--max-time", "15", "-A", agent])
+            .args(["-H", "Accept: text/html,application/json;q=0.9,*/*;q=0.8", "-H", "Accept-Language: en"])
+            .arg("-o")
+            .arg(&out)
+            .arg("--")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    })?;
+    let bytes = std::fs::read(&out).unwrap_or_default();
+    let _ = std::fs::remove_file(&out);
+    if !status.success() || bytes.is_empty() {
+        return Err("no answer".to_string());
+    }
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 /// Looks for a newer release in the background (once per few minutes at most).
