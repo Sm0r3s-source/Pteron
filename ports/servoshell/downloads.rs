@@ -181,7 +181,14 @@ fn is_dangerous(name: &str) -> bool {
     extension_of(name).is_some_and(|ext| DANGEROUS_EXTENSIONS.contains(&ext.as_str()))
 }
 
+#[cfg(test)]
+static TEST_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 fn download_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DIR.lock().unwrap().clone() {
+        return dir;
+    }
     dirs::download_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
         .unwrap_or_else(|| PathBuf::from("."))
@@ -556,22 +563,19 @@ fn run(id: u64, url: String, part: PathBuf, cancel: Arc<AtomicBool>) {
         }
     };
 
-    if status.success() &&
-        let Some(tags) = LIST
-            .lock()
-            .unwrap()
-            .iter()
+    // Look the song details up first and let go of the list before anything else touches it:
+    // a lock kept inside an `if let` would still be held in its body, and the next `LIST.lock()`
+    // there waited for itself forever (the whole window froze).
+    let convert = if status.success() {
+        let list = LIST.lock().unwrap();
+        list.iter()
             .find(|e| e.item.id == id)
-            .and_then(|e| e.item.convert.clone())
-    {
+            .and_then(|e| e.item.convert.clone().map(|tags| (tags, e.item.name.clone())))
+    } else {
+        None
+    };
+    if let Some((tags, name)) = convert {
         // A song saved as MP3: the sound that just arrived is converted.
-        let name = LIST
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|e| e.item.id == id)
-            .map(|e| e.item.name.clone())
-            .unwrap_or_else(|| "song.mp3".into());
         let final_path = unique_path(&download_dir(), &name);
         let mut temp = final_path.clone().into_os_string();
         temp.push(".convert");
@@ -704,5 +708,80 @@ mod tests {
         assert_eq!(format_bytes(12), "12 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    /// A whole song download: a local server hands out a sound file, the download runs and the
+    /// MP3 appears. The list must stay usable the whole time (a lock held too long froze the
+    /// whole window once).
+    #[test]
+    fn song_download_finishes_and_the_list_stays_usable() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let dir = std::env::temp_dir().join(format!("pteron_dl_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("source.m4a");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=3:sample_rate=44100", "-c:a", "aac"])
+            .arg(&src)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made || std::process::Command::new("curl").arg("--version").output().is_err() {
+            eprintln!("ffmpeg or curl is not installed: skipping");
+            return;
+        }
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        *TEST_DIR.lock().unwrap() = Some(out.clone());
+        let bytes = std::fs::read(&src).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+                let _ = stream.write_all(header.as_bytes());
+                if !head.starts_with("HEAD") {
+                    let _ = stream.write_all(&bytes);
+                }
+            }
+        });
+        begin_named(
+            &format!("http://127.0.0.1:{port}/song.m4a"),
+            "Test Song.mp3".into(),
+            Some(crate::mp3::Tags { title: "Test Song".into(), artist: "Me".into() }),
+        );
+        let started = Instant::now();
+        let mut finished = false;
+        while started.elapsed() < Duration::from_secs(40) {
+            // The window asks for the list on every frame: it must never wait long.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(snapshot());
+            });
+            let items = rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("the download list is stuck (a lock is held)");
+            if let Some(item) = items.iter().find(|i| i.name == "Test Song.mp3") {
+                match &item.state {
+                    State::Done => {
+                        finished = true;
+                        break;
+                    },
+                    State::Failed(why) => panic!("download failed: {why}"),
+                    _ => {},
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(finished, "the song download did not finish");
+        let file = std::fs::read(out.join("Test Song.mp3")).unwrap();
+        assert!(file.starts_with(b"ID3"), "an MP3 with a tag");
+        *TEST_DIR.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
