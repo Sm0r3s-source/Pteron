@@ -928,7 +928,12 @@ impl Gui {
             let page_area = ctx.available_rect_before_wrap();
             if settings_page::show(ctx, settings_page, settings, page_area) {
                 apply_theme(ctx, settings);
+                let compat_changed = pteron::settings().compat != settings.compat;
                 pteron::update(settings.clone());
+                if compat_changed {
+                    state.apply_compat();
+                    window.queue_user_interface_command(UserInterfaceCommand::ReloadAll);
+                }
             }
             if let Some(result) = crate::sync::take_chosen() {
                 settings_page.notice = Some(match result {
@@ -1272,6 +1277,17 @@ impl Gui {
             });
             if open {
                 crate::downloads::open_in_default_browser(page.as_str());
+            }
+        } else if crate::compat::safe_notice_visible(&crate::pteron::settings().compat) {
+            let mut ok = false;
+            place("pteron_safe_mode").show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label("Pteron did not close properly last time, so the newer web features are off for this session.");
+                    ok = ui.button("OK").clicked();
+                });
+            });
+            if ok {
+                crate::compat::dismiss_safe_notice();
             }
         } else if let Some(text) = crate::passwords::message() {
             place("pteron_password_message").show(ctx, |ui| {

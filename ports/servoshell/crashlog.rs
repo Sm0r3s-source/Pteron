@@ -204,6 +204,8 @@ pub(crate) fn begin_session() {
     let Some(dir) = crash_dir() else { return };
     if let Some(entry) = begin_session_in(&dir, now()) {
         append_to(&dir, now(), &entry);
+        // Newer web features stay off for this session (see compat.rs).
+        crate::compat::set_safe_mode(true);
     }
 }
 

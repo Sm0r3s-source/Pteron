@@ -72,6 +72,8 @@ pub(crate) struct Settings {
     pub newtab_bg: String,
     /// Colour used when `newtab_bg` is "color" (#rrggbb).
     pub newtab_color: String,
+    /// Ids from `compat::FEATURES` that are switched on (newer web features, off by default).
+    pub compat: Vec<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +101,7 @@ impl Default for Settings {
             accent_custom: "#d6aa48".to_string(),
             newtab_bg: "theme".to_string(),
             newtab_color: "#1b1c1e".to_string(),
+            compat: Vec::new(),
         }
     }
 }
@@ -167,6 +170,11 @@ pub(crate) fn apply_json(settings: &mut Settings, value: &serde_json::Value) {
     }
     if let Some(enabled) = value.get("https_warning").and_then(|v| v.as_bool()) {
         settings.https_warning = enabled;
+    }
+    if let Some(list) = value.get("compat").and_then(|v| v.as_array()) {
+        settings.compat = crate::compat::clean_ids(
+            list.iter().filter_map(|item| item.as_str().map(str::to_string)),
+        );
     }
     if let Some(enabled) = value.get("adblock").and_then(|v| v.as_bool()) {
         settings.adblock = enabled;
@@ -273,6 +281,7 @@ pub(crate) fn update(new_settings: Settings) {
         "accent_custom": new_settings.accent_custom,
         "newtab_bg": new_settings.newtab_bg,
         "newtab_color": new_settings.newtab_color,
+        "compat": new_settings.compat,
     });
     if let Err(error) = std::fs::write(&path, json.to_string()) {
         warn!("Could not save {}: {error}", path.display());
@@ -686,6 +695,23 @@ box.style.setProperty('display','none','important');
 }catch(e){}},250);
 }catch(e){}},true);
 }catch(e){}})();"#;
+
+#[cfg(test)]
+mod compat_setting_tests {
+    use super::*;
+
+    #[test]
+    fn compat_list_is_read_and_cleaned() {
+        let mut settings = Settings::default();
+        assert!(settings.compat.is_empty());
+        let value = serde_json::json!({ "compat": ["fonts", "bogus", "fonts", "canvas", 7] });
+        apply_json(&mut settings, &value);
+        assert_eq!(settings.compat, vec!["fonts".to_string(), "canvas".to_string()]);
+        // A file without the key leaves the choice alone.
+        apply_json(&mut settings, &serde_json::json!({ "adblock": true }));
+        assert_eq!(settings.compat.len(), 2);
+    }
+}
 
 #[cfg(test)]
 mod google_fix_tests {

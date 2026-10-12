@@ -451,6 +451,18 @@ impl RunningAppState {
         }
     }
 
+    /// Pteron: switches the newer web features chosen in Settings on or off. Skipped while
+    /// the all-in-one experimental switch is on, which owns the same preferences.
+    pub(crate) fn apply_compat(&self) {
+        if self.experimental_preferences_enabled.get() {
+            return;
+        }
+        let enabled = crate::pteron::settings().compat;
+        for (pref, on) in crate::compat::wanted_prefs(&enabled, crate::compat::safe_mode()) {
+            self.servo.set_preference(pref, PrefValue::Bool(on));
+        }
+    }
+
     /// Close any [`ServoShellWindow`] that doesn't have an open [`WebView`].
     fn close_empty_windows(&self) {
         let mut move_focus = false;

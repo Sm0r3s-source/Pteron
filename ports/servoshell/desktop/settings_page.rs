@@ -25,17 +25,19 @@ pub(crate) enum Category {
     Startup,
     Tabs,
     Video,
+    Compatibility,
     Privacy,
     About,
 }
 
 impl Category {
-    const ALL: [Category; 7] = [
+    const ALL: [Category; 8] = [
         Category::Search,
         Category::Appearance,
         Category::Startup,
         Category::Tabs,
         Category::Video,
+        Category::Compatibility,
         Category::Privacy,
         Category::About,
     ];
@@ -47,6 +49,7 @@ impl Category {
             Category::Startup => "On startup",
             Category::Tabs => "Tabs & memory",
             Category::Video => "Video",
+            Category::Compatibility => "Web compatibility",
             Category::Privacy => "Privacy & data",
             Category::About => "About",
         }
@@ -215,6 +218,9 @@ pub(crate) fn show(
                                                 },
                                                 Category::Video => {
                                                     changed |= video_section(ui, settings)
+                                                },
+                                                Category::Compatibility => {
+                                                    changed |= compat_section(ui, settings)
                                                 },
                                                 Category::Privacy => privacy_section(
                                                     ui,
@@ -750,6 +756,44 @@ fn video_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
             changed |= ui
                 .checkbox(&mut settings.hw_video_decode, "Use hardware video decoding")
                 .changed();
+        },
+    );
+    changed
+}
+
+fn compat_section(ui: &mut egui::Ui, settings: &mut pteron::Settings) -> bool {
+    let mut changed = false;
+    card(
+        ui,
+        "Newer web features",
+        Some(
+            "Servo, the engine inside Pteron, has these features built in but switched off \
+             because they are still being finished. Turning one on can make a site work that \
+             did not, but it can also make a page slower or crash. Pages reload when you change \
+             a switch. If Pteron does not close properly, these stay off for the next session.",
+        ),
+        "compatibility experimental features indexeddb intersection observer fontface canvas storage container queries web apps",
+        |ui| {
+            if crate::compat::safe_mode() && !settings.compat.is_empty() {
+                ui.label(
+                    RichText::new("Pteron did not close properly last time, so these are off for this session. Restart Pteron to use them again.")
+                        .color(ui.visuals().warn_fg_color),
+                );
+                ui.add_space(6.0);
+            }
+            for feature in crate::compat::FEATURES {
+                let mut on = settings.compat.iter().any(|id| id == feature.id);
+                let response = ui.checkbox(&mut on, feature.title).on_hover_text(feature.note);
+                ui.label(RichText::new(feature.note).small().weak());
+                ui.add_space(4.0);
+                if response.changed() {
+                    settings.compat.retain(|id| id != feature.id);
+                    if on {
+                        settings.compat.push(feature.id.to_string());
+                    }
+                    changed = true;
+                }
+            }
         },
     );
     changed
